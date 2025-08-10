@@ -3,7 +3,8 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
-  model?: string; // Model used to generate this message (for assistant messages)
+  modelId?: string; // App-provided model identifier (e.g., 'gpt-4o')
+  modelName?: string; // OpenAI-returned model name (e.g., 'gpt-4o-2024-08-06')
 }
 
 export interface Thread {

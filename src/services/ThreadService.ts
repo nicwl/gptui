@@ -52,7 +52,8 @@ export class ThreadService {
         role: 'assistant',
         content: aiResponse.content,
         timestamp: Date.now(),
-        model: aiResponse.model,
+        modelId: selectedModel, // App-provided model ID
+        modelName: aiResponse.model, // OpenAI-returned model name
       };
 
       // Add AI message
@@ -94,7 +95,8 @@ export class ThreadService {
         role: 'assistant',
         content: 'Sorry, I encountered an error while processing your request. Please check your API key and try again.',
         timestamp: Date.now(),
-        model: 'error',
+        modelId: 'error',
+        modelName: 'error',
       };
 
       console.log('📝 ThreadService: Adding error message to thread');
@@ -133,7 +135,8 @@ export class ThreadService {
         role: 'assistant',
         content: aiResponse.content,
         timestamp: Date.now(),
-        model: aiResponse.model,
+        modelId: 'gpt-5-chat-latest', // App-provided model ID
+        modelName: aiResponse.model, // OpenAI-returned model name
       };
 
       // Add AI message
@@ -149,6 +152,8 @@ export class ThreadService {
         role: 'assistant',
         content: 'Sorry, I encountered an error while processing your request. Please check your API key and try again.',
         timestamp: Date.now(),
+        modelId: 'error',
+        modelName: 'error',
       };
 
       console.log('📝 ThreadService: Adding error message to thread');

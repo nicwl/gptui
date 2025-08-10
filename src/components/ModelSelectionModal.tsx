@@ -1,10 +1,11 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   Modal,
   StyleSheet,
+  Animated,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -18,29 +19,26 @@ interface ModelSelectionModalProps {
 const AVAILABLE_MODELS = [
   {
     id: 'gpt-5-chat-latest',
-    name: 'GPT-5 Chat (Latest)',
+    name: 'GPT-5 Chat',
     description: 'Most advanced model for conversations',
     isDefault: true,
+  },
+  {
+    id: 'gpt-5',
+    name: 'GPT-5',
+    description: 'The latest model from OpenAI',
+    isDefault: false,
+  },
+  {
+    id: 'gpt-4.1',
+    name: 'GPT-4.1',
+    description: 'Good at instruction-following',
+    isDefault: false,
   },
   {
     id: 'gpt-4o',
     name: 'GPT-4o',
     description: 'Multimodal flagship model',
-  },
-  {
-    id: 'gpt-4o-mini',
-    name: 'GPT-4o Mini',
-    description: 'Fast and efficient',
-  },
-  {
-    id: 'gpt-4-turbo',
-    name: 'GPT-4 Turbo',
-    description: 'High performance model',
-  },
-  {
-    id: 'gpt-3.5-turbo',
-    name: 'GPT-3.5 Turbo',
-    description: 'Fast and cost-effective',
   },
 ];
 
@@ -51,6 +49,55 @@ const ModelSelectionModal: React.FC<ModelSelectionModalProps> = ({
   onClose,
 }) => {
   const insets = useSafeAreaInsets();
+  const backdropOpacity = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(300)).current; // Start 300px below
+  const wasVisible = useRef(false);
+  const [modalVisible, setModalVisible] = React.useState(false);
+
+  useEffect(() => {
+    if (visible) {
+      // Show modal immediately when we want to open it
+      setModalVisible(true);
+      
+      // Reset to starting position first, then animate in
+      backdropOpacity.setValue(0);
+      slideAnim.setValue(300);
+      
+      // Animate in: fade backdrop and slide modal up
+      Animated.parallel([
+        Animated.timing(backdropOpacity, {
+          toValue: 1,
+          duration: 300,
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: 0,
+          duration: 300,
+          useNativeDriver: true,
+        }),
+      ]).start();
+      
+      wasVisible.current = true;
+    } else if (!visible && wasVisible.current) {
+      // Only animate out if we were previously visible (avoid animating on initial render)
+      Animated.parallel([
+        Animated.timing(backdropOpacity, {
+          toValue: 0,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: 300,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+      ]).start(() => {
+        // Hide modal only after animation completes
+        setModalVisible(false);
+        wasVisible.current = false;
+      });
+    }
+  }, [visible, backdropOpacity, slideAnim]);
 
   const handleSelectModel = (modelId: string) => {
     onSelectModel(modelId);
@@ -59,18 +106,28 @@ const ModelSelectionModal: React.FC<ModelSelectionModalProps> = ({
 
   return (
     <Modal
-      visible={visible}
+      visible={modalVisible}
       transparent
-      animationType="fade"
+      animationType="none"
       onRequestClose={onClose}
     >
-      <View style={styles.backdrop}>
-        <TouchableOpacity
-          style={styles.backdropTouchable}
-          onPress={onClose}
-          activeOpacity={1}
-        />
-        <View style={[styles.modal, { paddingBottom: insets.bottom }]}>
+      <View style={styles.container}>
+        <Animated.View style={[styles.backdrop, { opacity: backdropOpacity }]}>
+          <TouchableOpacity
+            style={styles.backdropTouchable}
+            onPress={onClose}
+            activeOpacity={1}
+          />
+        </Animated.View>
+        <Animated.View 
+          style={[
+            styles.modal, 
+            { 
+              paddingBottom: insets.bottom,
+              transform: [{ translateY: slideAnim }]
+            }
+          ]}
+        >
           <View style={styles.header}>
             <Text style={styles.title}>Select Model</Text>
             <TouchableOpacity onPress={onClose} style={styles.closeButton}>
@@ -105,17 +162,24 @@ const ModelSelectionModal: React.FC<ModelSelectionModalProps> = ({
               </TouchableOpacity>
             ))}
           </View>
-        </View>
+        </Animated.View>
       </View>
     </Modal>
   );
 };
 
 const styles = StyleSheet.create({
-  backdrop: {
+  container: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'flex-end',
+  },
+  backdrop: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
   },
   backdropTouchable: {
     flex: 1,
@@ -200,4 +264,4 @@ const styles = StyleSheet.create({
   },
 });
 
-export default ModelSelectionModal;
+export {ModelSelectionModal, AVAILABLE_MODELS};

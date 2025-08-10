@@ -7,7 +7,7 @@ import { RouteProp } from '@react-navigation/native';
 import { useApp } from '../context/AppContext';
 import { NavigationParams, Message } from '../types';
 import ChatSidebar from '../components/ChatSidebar';
-import ModelSelectionModal from '../components/ModelSelectionModal';
+import {ModelSelectionModal, AVAILABLE_MODELS} from '../components/ModelSelectionModal';
 
 type ChatScreenNavigationProp = StackNavigationProp<NavigationParams, 'Chat'>;
 type ChatScreenRouteProp = RouteProp<NavigationParams, 'Chat'>;
@@ -39,14 +39,8 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   const hideSidebar = () => setIsSidebarVisible(false);
 
   const getModelDisplayName = (modelId: string) => {
-    const modelMap: Record<string, string> = {
-      'gpt-5-chat-latest': 'GPT-5 Chat',
-      'gpt-4o': 'GPT-4o',
-      'gpt-4o-mini': 'GPT-4o Mini',
-      'gpt-4-turbo': 'GPT-4 Turbo',
-      'gpt-3.5-turbo': 'GPT-3.5 Turbo',
-    };
-    return modelMap[modelId] || modelId;
+    const model = AVAILABLE_MODELS.find(m => m.id === modelId);
+    return model?.name || modelId;
   };
 
   const handleModelSelection = () => {
@@ -56,29 +50,28 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   useEffect(() => {
     // Set up navigation header
     navigation.setOptions({
-      title: 'GPT Chat',
-      headerTitleStyle: { fontSize: 17 },
+      title: '', // Remove title
+      headerTitle: () => (
+        <TouchableOpacity
+          style={styles.centerModelButton}
+          onPress={handleModelSelection}
+          accessibilityLabel="Select Model"
+        >
+          <Text style={styles.centerModelButtonText}>
+            {getModelDisplayName(state.selectedModel)}
+          </Text>
+          <Text style={styles.centerModelButtonArrow}>▼</Text>
+        </TouchableOpacity>
+      ),
       headerRight: () => (
-        <View style={styles.headerButtons}>
-          <TouchableOpacity
-            style={styles.modelButton}
-            onPress={handleModelSelection}
-            accessibilityLabel="Select Model"
-          >
-            <Text style={styles.modelButtonText}>
-              {getModelDisplayName(state.selectedModel)}
-            </Text>
-            <Text style={styles.modelButtonArrow}>▼</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.headerButton}
-            onPress={handleNewChat}
-            accessibilityLabel="New Chat"
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Text style={[styles.headerButtonText, { fontSize: 20 }]}>＋</Text>
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity
+          style={styles.headerButton}
+          onPress={handleNewChat}
+          accessibilityLabel="New Chat"
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <Text style={[styles.headerButtonText, { fontSize: 20 }]}>＋</Text>
+        </TouchableOpacity>
       ),
       headerLeft: () => (
         <TouchableOpacity
@@ -139,28 +132,11 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
-  // Derived flags/data for list behavior - memoized to prevent stale renders
-  const { hasMessages, messagesData } = React.useMemo(() => {
-    const messages = currentThread?.messages || [];
-    const hasMessages = messages.length > 0;
-    const messagesData = hasMessages ? [...messages].reverse() : [];
-    return { hasMessages, messagesData };
-  }, [currentThread?.messages]);
 
-  useEffect(() => {
-    if (Platform.OS !== 'ios') return;
-    const sub = Keyboard.addListener('keyboardWillShow', () => {
-      // Use non-animated scroll here and let the keyboard animate; then do a gentle finalize after a short delay
-      if (!flatListRef.current) return;
-      if (hasMessages) {
-        flatListRef.current.scrollToOffset({ offset: 0, animated: true });
-      } else {
-        flatListRef.current.scrollToEnd({ animated: true });
-      }
-      //setTimeout(() => scrollToBottom(), 120);
-    });
-    return () => sub.remove();
-  }, [hasMessages]);
+  const messages = currentThread?.messages || [];
+  const hasMessages = messages.length > 0;
+  const messagesData = hasMessages ? [...messages].reverse() : [];
+
 
   const renderMessage = ({ item }: { item: Message }) => (
     <View style={[
@@ -177,9 +153,9 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
         <Text style={styles.messageTime}>
           {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
         </Text>
-        {item.model && item.role === 'assistant' && (
+        {item.modelId && item.role === 'assistant' && (
           <Text style={styles.messageModel}>
-            {getModelDisplayName(item.model)}
+            {getModelDisplayName(item.modelId)}
           </Text>
         )}
       </View>
@@ -219,7 +195,7 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
         keyExtractor={(item) => item.id}
         style={styles.messagesList}
         inverted={hasMessages}
-        maintainVisibleContentPosition={hasMessages ? { minIndexForVisible: 1, autoscrollToTopThreshold: 50 } : undefined}
+        maintainVisibleContentPosition={hasMessages ? { minIndexForVisible: 0, autoscrollToTopThreshold: 50 } : undefined}
         contentContainerStyle={[
           styles.messagesContainer,
           { padding: 0, paddingHorizontal: 12 },
@@ -319,6 +295,24 @@ const styles = StyleSheet.create({
   modelButtonArrow: {
     color: '#007AFF',
     fontSize: 10,
+  },
+  centerModelButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: '#F2F2F7',
+    borderRadius: 8,
+  },
+  centerModelButtonText: {
+    color: '#007AFF',
+    fontSize: 16,
+    fontWeight: '600',
+    marginRight: 4,
+  },
+  centerModelButtonArrow: {
+    color: '#007AFF',
+    fontSize: 12,
   },
   messagesList: {
     flex: 1,
