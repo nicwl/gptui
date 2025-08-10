@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, Alert, KeyboardAvoidingView, Platform, useWindowDimensions, Keyboard } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, Alert, KeyboardAvoidingView, Platform, useWindowDimensions, Keyboard, Animated } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { useHeaderHeight } from '@react-navigation/elements';
@@ -7,7 +7,7 @@ import { RouteProp } from '@react-navigation/native';
 import { useApp } from '../context/AppContext';
 import { NavigationParams, Message } from '../types';
 import ChatSidebar from '../components/ChatSidebar';
-import {ModelSelectionModal, AVAILABLE_MODELS} from '../components/ModelSelectionModal';
+import { ModelSelectionModal, AVAILABLE_MODELS } from '../components/ModelSelectionModal.tsx';
 
 type ChatScreenNavigationProp = StackNavigationProp<NavigationParams, 'Chat'>;
 type ChatScreenRouteProp = RouteProp<NavigationParams, 'Chat'>;
@@ -16,6 +16,105 @@ interface Props {
   navigation: ChatScreenNavigationProp;
   route: ChatScreenRouteProp;
 }
+
+// Helper component to render streaming text with character-by-character reveal
+const StreamingText = ({ content, isStreaming, style }: { content: string, isStreaming: boolean, style: any }) => {
+  const [revealedLength, setRevealedLength] = useState(0);
+  const [hasStartedRevealing, setHasStartedRevealing] = useState(false);
+  const [targetEndTime, setTargetEndTime] = useState<number | null>(null);
+  const [wasStreaming, setWasStreaming] = useState(false);
+  
+  useEffect(() => {
+    // Lock in the target end time when streaming transitions from true to false
+    if (wasStreaming && !isStreaming) {
+      const endTime = performance.now() + 10000; // 10 seconds from now
+      setTargetEndTime(endTime);
+    }
+    setWasStreaming(isStreaming);
+  }, [isStreaming, wasStreaming]);
+  
+  useEffect(() => {
+    // Start revealing when streaming begins or continue if there's more content to reveal
+    if ((isStreaming || revealedLength < content.length) && content.length > revealedLength) {
+      if (isStreaming && !hasStartedRevealing) {
+        setHasStartedRevealing(true);
+        setRevealedLength(0);
+        setTargetEndTime(null); // Reset target time for new streaming
+      }
+      
+      let lastUpdateTime = performance.now();
+      let animationId: number;
+      
+      const updateReveal = () => {
+        const now = performance.now();
+        const deltaTime = now - lastUpdateTime;
+        
+        if (isStreaming) {
+          // During streaming: reveal 1 character every 3ms
+          if (deltaTime >= 3) {
+            setRevealedLength(prev => Math.min(prev + 1, content.length));
+            lastUpdateTime = now;
+          }
+        } else if (targetEndTime) {
+          // After streaming: maintain or increase speed, never slow down
+          const remainingTime = Math.max(1, targetEndTime - now);
+          const remainingChars = content.length - revealedLength;
+          
+          if (remainingChars > 0) {
+            // Only reveal if enough time has passed (maintain 3ms minimum interval)
+            if (deltaTime >= 3) {
+              // Calculate minimum characters per frame to finish on time
+              const framesRemaining = Math.max(1, Math.ceil(remainingTime / 16)); // ~60fps
+              const minCharsPerFrame = Math.ceil(remainingChars / framesRemaining);
+              
+              // At streaming speed, reveal 1 char per 3ms interval
+              const streamingSpeedChars = 1;
+              const charsToReveal = Math.max(streamingSpeedChars, minCharsPerFrame);
+              
+              setRevealedLength(prev => Math.min(prev + charsToReveal, content.length));
+              lastUpdateTime = now;
+            }
+          }
+        }
+        
+        // Continue animation if there's more to reveal
+        if (revealedLength < content.length) {
+          animationId = requestAnimationFrame(updateReveal);
+        }
+      };
+      
+      animationId = requestAnimationFrame(updateReveal);
+      
+      return () => {
+        if (animationId) {
+          cancelAnimationFrame(animationId);
+        }
+      };
+    }
+  }, [content, isStreaming, revealedLength, hasStartedRevealing, targetEndTime]);
+  
+  useEffect(() => {
+    // Reset when component receives new content and streaming starts
+    if (isStreaming && !hasStartedRevealing) {
+      setRevealedLength(0);
+      setHasStartedRevealing(true);
+    }
+  }, [isStreaming, hasStartedRevealing]);
+  
+  // If we haven't started revealing yet (before streaming begins), show full content
+  if (!hasStartedRevealing) {
+    return <Text style={style}>{content}</Text>;
+  }
+
+  // Show only the revealed portion of the content
+  const visibleContent = content.slice(0, revealedLength);
+  
+  return (
+    <Text style={style}>
+      {visibleContent}
+    </Text>
+  );
+};
 
 const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   const { state, actions } = useApp();
@@ -38,10 +137,10 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   };
   const hideSidebar = () => setIsSidebarVisible(false);
 
-  const getModelDisplayName = (modelId: string) => {
-    const model = AVAILABLE_MODELS.find(m => m.id === modelId);
-    return model?.name || modelId;
-  };
+      const getModelDisplayName = (modelId: string) => {
+      const model = AVAILABLE_MODELS.find((m: any) => m.id === modelId);
+      return model?.name || modelId;
+    };
 
   const handleModelSelection = () => {
     setIsModelModalVisible(true);
@@ -133,9 +232,18 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   };
 
 
-  const messages = currentThread?.messages || [];
-  const hasMessages = messages.length > 0;
-  const messagesData = hasMessages ? [...messages].reverse() : [];
+  // Memoize message-related state to ensure proper re-renders during streaming
+  const messages = React.useMemo(() => {
+    return currentThread?.messages || [];
+  }, [currentThread?.messages]);
+
+  const hasMessages = React.useMemo(() => {
+    return messages.length > 0;
+  }, [messages.length]);
+
+  const messagesData = React.useMemo(() => {
+    return hasMessages ? [...messages].reverse() : [];
+  }, [messages, hasMessages]);
 
 
   const renderMessage = ({ item }: { item: Message }) => (
@@ -143,20 +251,25 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
       styles.messageContainer,
       item.role === 'user' ? styles.userMessage : styles.assistantMessage
     ]}>
-      <Text style={[
-        styles.messageText,
-        item.role === 'user' ? styles.userMessageText : styles.assistantMessageText
-      ]}>
-        {item.content}
-      </Text>
+      <StreamingText 
+        content={item.content}
+        isStreaming={item.isStreaming || false}
+        style={[
+          styles.messageText,
+          item.role === 'user' ? styles.userMessageText : styles.assistantMessageText
+        ]}
+      />
       <View style={styles.messageFooter}>
         <Text style={styles.messageTime}>
           {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
         </Text>
-        {item.modelId && item.role === 'assistant' && (
+        {item.modelId && item.role === 'assistant' && !item.isStreaming && (
           <Text style={styles.messageModel}>
             {getModelDisplayName(item.modelId)}
           </Text>
+        )}
+        {item.isStreaming && (
+          <Text style={styles.streamingIndicator}>Typing...</Text>
         )}
       </View>
     </View>
@@ -205,12 +318,6 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
         ]}
         ListEmptyComponent={renderEmptyState}
       />
-
-      {isTyping && (
-        <View style={styles.typingIndicator}>
-          <Text style={styles.typingText}>AI is typing...</Text>
-        </View>
-      )}
 
       <View style={[styles.inputContainer, { paddingTop: 10, paddingBottom: insets.bottom, paddingHorizontal: Math.max(16, insets.left + 12, insets.right + 12) }]}>
         <TextInput
@@ -364,6 +471,13 @@ const styles = StyleSheet.create({
     opacity: 0.5,
     marginLeft: 8,
     fontStyle: 'italic',
+  },
+
+  streamingIndicator: {
+    fontSize: 10,
+    color: '#007AFF',
+    fontStyle: 'italic',
+    marginLeft: 8,
   },
   emptyState: {
     flex: 1,

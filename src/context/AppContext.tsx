@@ -17,6 +17,7 @@ interface AppContextType {
     setCurrentThread: (threadId: string | null) => void;
     sendMessage: (message: string) => Promise<void>;
     deleteThread: (threadId: string) => Promise<void>;
+    updateStreamingMessage: (threadId: string, messageId: string, content: string, done: boolean, model?: string) => void;
     setLoading: (loading: boolean) => void;
     setModel: (model: string) => void;
   };
@@ -28,6 +29,7 @@ type AppAction =
   | { type: 'SET_CURRENT_THREAD'; payload: string | null }
   | { type: 'UPDATE_THREAD'; payload: Thread }
   | { type: 'DELETE_THREAD'; payload: string }
+  | { type: 'UPDATE_STREAMING_MESSAGE'; payload: { threadId: string; messageId: string; content: string; done: boolean; model?: string } }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_MODEL'; payload: string }
   | { type: 'CREATE_THREAD_WITH_MESSAGE'; payload: { thread: Thread; message: Message } };
@@ -88,6 +90,46 @@ function appReducer(state: AppState, action: AppAction): AppState {
         threads: allThreads,
         currentThreadId: threadWithMessage.id,
       };
+    case 'UPDATE_STREAMING_MESSAGE':
+      const { threadId, messageId, content, done, model } = action.payload;
+      
+      const streamingThreads = state.threads.map(thread => {
+        if (thread.id !== threadId) return thread;
+        
+        const updatedMessages = thread.messages.map(msg => {
+          if (msg.id !== messageId) return msg;
+          
+          // Update the streaming message
+          const updatedMsg = {
+            ...msg,
+            content,
+            isStreaming: !done,
+          };
+          
+          // Add model info when streaming is complete
+          if (done && model) {
+            updatedMsg.modelName = model;
+          }
+          
+          return updatedMsg;
+        });
+        
+        return {
+          ...thread,
+          messages: updatedMessages,
+          updatedAt: done ? Date.now() : thread.updatedAt, // Only update timestamp when done
+        };
+      });
+      
+      // Sort threads if streaming is complete
+      if (done) {
+        streamingThreads.sort((a, b) => b.updatedAt - a.updatedAt);
+      }
+      
+      return {
+        ...state,
+        threads: streamingThreads,
+      };
     default:
       return state;
   }
@@ -101,7 +143,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Create services only once using useMemo
   const { openAIService, threadService } = useMemo(() => {
     const openAIService = new OpenAIService();
-    const threadService = new ThreadService(openAIService);
+    const streamingCallback = (threadId: string, messageId: string, content: string, done: boolean, model?: string) => {
+      dispatch({ 
+        type: 'UPDATE_STREAMING_MESSAGE', 
+        payload: { threadId, messageId, content, done, model } 
+      });
+    };
+    const threadService = new ThreadService(openAIService, streamingCallback);
     return { openAIService, threadService };
   }, []); // Empty dependency array means this only runs once
 
@@ -217,11 +265,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // Keep optimistic state even if persistence fails
       }
 
-      // 3) Request AI response
+      // 3) Add initial streaming AI message to state
+      const aiMsg: Message = {
+        id: uuid.v4() as string,
+        role: 'assistant',
+        content: '',
+        timestamp: Date.now(),
+        modelId: state.selectedModel,
+        modelName: undefined,
+        isStreaming: true,
+      };
+      
+      const threadWithAI: Thread = {
+        ...currentThread,
+        messages: [...currentThread.messages, aiMsg],
+        updatedAt: Date.now(),
+      };
+      
+      console.log('🤖 AppContext: Adding initial streaming AI message to state');
+      dispatch({ type: 'UPDATE_THREAD', payload: threadWithAI });
+      currentThread = threadWithAI;
+
+      // 4) Request AI response with streaming
       console.log('🔄 AppContext: Setting loading to true');
       dispatch({ type: 'SET_LOADING', payload: true });
       try {
-        const finalThread = await threadService.continueConversation(currentThread, state.selectedModel);
+        const finalThread = await threadService.continueConversationStreaming(currentThread, state.selectedModel, aiMsg.id);
         console.log('✅ AppContext: Received AI response; updating thread');
         dispatch({ type: 'UPDATE_THREAD', payload: finalThread });
       } catch (error) {
@@ -241,6 +310,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         console.error('Failed to delete thread:', error);
         throw error;
       }
+    },
+
+    updateStreamingMessage: (threadId: string, messageId: string, content: string, done: boolean, model?: string) => {
+      dispatch({ 
+        type: 'UPDATE_STREAMING_MESSAGE', 
+        payload: { threadId, messageId, content, done, model } 
+      });
     },
 
     setLoading: (loading: boolean) => {

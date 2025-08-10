@@ -5,6 +5,7 @@ export interface Message {
   timestamp: number;
   modelId?: string; // App-provided model identifier (e.g., 'gpt-4o')
   modelName?: string; // OpenAI-returned model name (e.g., 'gpt-4o-2024-08-06')
+  isStreaming?: boolean; // Whether this message is currently being streamed
 }
 
 export interface Thread {
