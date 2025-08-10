@@ -144,8 +144,12 @@ export class ThreadService {
 
       // Start streaming
       console.log('🤖 ThreadService: Starting streaming...');
-      const preAiUserOnly = thread.messages.length === 1 && thread.messages[0].role === 'user';
-      const userFirstMessage = preAiUserOnly ? thread.messages[0].content : null;
+      // Check if this is the first exchange (1 user message + 1 empty AI message)
+      const isFirstExchange = thread.messages.length === 2 && 
+                             thread.messages[0].role === 'user' && 
+                             thread.messages[1].role === 'assistant' && 
+                             thread.messages[1].content === '';
+      const userFirstMessage = isFirstExchange ? thread.messages[0].content : null;
       
       const response = await this.openAIService.sendMessageStream(
         thread.messages, 
@@ -179,7 +183,7 @@ export class ThreadService {
       await StorageService.saveThread(updatedThread);
 
       // Handle thread naming if first exchange
-      if (preAiUserOnly && userFirstMessage && this.openAIService.hasApiKey()) {
+      if (isFirstExchange && userFirstMessage && this.openAIService.hasApiKey()) {
         try {
           const generatedName = await this.openAIService.generateThreadNameFromPair(
             userFirstMessage,

@@ -27,7 +27,7 @@ const StreamingText = ({ content, isStreaming, style }: { content: string, isStr
   useEffect(() => {
     // Lock in the target end time when streaming transitions from true to false
     if (wasStreaming && !isStreaming) {
-      const endTime = performance.now() + 10000; // 10 seconds from now
+      const endTime = performance.now() + 5000; // 5 seconds from now
       setTargetEndTime(endTime);
     }
     setWasStreaming(isStreaming);
