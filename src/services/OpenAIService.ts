@@ -23,16 +23,16 @@ export class OpenAIService {
     return this.openai !== null;
   }
 
-  async sendMessage(messages: Message[]): Promise<string> {
+  async sendMessage(messages: Message[], model: string = 'gpt-5-chat-latest'): Promise<{ content: string; model: string }> {
     if (!this.openai) {
       throw new Error('OpenAI API key not configured');
     }
 
-    console.log('📤 Sending message to OpenAI with', messages.length, 'messages');
+    console.log('📤 Sending message to OpenAI with', messages.length, 'messages using model:', model);
     
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
+        model,
         messages: messages.map(msg => ({
           role: msg.role,
           content: msg.content,
@@ -49,7 +49,7 @@ export class OpenAIService {
       }
 
       console.log('✅ OpenAI response content:', content);
-      return content;
+      return { content, model: response.model || model };
     } catch (error) {
       console.error('❌ OpenAI API error:', error);
       console.error('❌ Error details:', JSON.stringify(error, null, 2));
@@ -67,7 +67,7 @@ export class OpenAIService {
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
+        model: 'gpt-4o-mini',
         messages: [
           {
             role: 'system',
@@ -103,7 +103,7 @@ export class OpenAIService {
 
     try {
       const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
+        model: 'gpt-4o-mini',
         messages: [
           {
             role: 'system',
@@ -129,6 +129,43 @@ export class OpenAIService {
       console.error('Failed to generate thread name from pair:', error);
       const combined = `${userFirst} · ${aiFirst}`.slice(0, 30);
       return combined.length >= 30 ? combined + '...' : combined;
+    }
+  }
+
+  async generateThreadNameFromHistory(messages: Message[]): Promise<string> {
+    if (!this.openai) {
+      throw new Error('OpenAI API key not configured');
+    }
+
+    // Use a small window of the conversation to keep prompt compact
+    const recent = messages.slice(-10).map(m => ({ role: m.role, content: m.content }));
+
+    try {
+      const response = await this.openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'Generate a concise, descriptive chat title (3-6 words) based on the conversation. Only return the title text, no quotes or punctuation around it.',
+          },
+          ...recent,
+        ],
+        temperature: 0.4,
+        max_tokens: 20,
+      });
+
+      const title = response.choices[0]?.message?.content?.trim();
+      if (!title) {
+        throw new Error('No title generated');
+      }
+      return title;
+    } catch (error) {
+      console.error('Failed to generate thread name from history:', error);
+      // Fallback: use first user message words
+      const firstUser = messages.find(m => m.role === 'user')?.content || 'New Chat';
+      const words = firstUser.split(' ').slice(0, 5).join(' ');
+      return words.length > 30 ? words.substring(0, 30) + '...' : words;
     }
   }
 }

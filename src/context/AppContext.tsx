@@ -2,6 +2,7 @@ import React, { createContext, useContext, useReducer, useEffect, ReactNode, use
 import { Thread, AppState, Message } from '../types';
 import uuid from 'react-native-uuid';
 import { SecureStorage } from '../services/SecureStorage';
+import { StorageService } from '../services/StorageService';
 import { OpenAIService } from '../services/OpenAIService';
 import { ThreadService } from '../services/ThreadService';
 
@@ -17,6 +18,7 @@ interface AppContextType {
     sendMessage: (message: string) => Promise<void>;
     deleteThread: (threadId: string) => Promise<void>;
     setLoading: (loading: boolean) => void;
+    setModel: (model: string) => void;
   };
 }
 
@@ -26,13 +28,16 @@ type AppAction =
   | { type: 'SET_CURRENT_THREAD'; payload: string | null }
   | { type: 'UPDATE_THREAD'; payload: Thread }
   | { type: 'DELETE_THREAD'; payload: string }
-  | { type: 'SET_LOADING'; payload: boolean };
+  | { type: 'SET_LOADING'; payload: boolean }
+  | { type: 'SET_MODEL'; payload: string }
+  | { type: 'CREATE_THREAD_WITH_MESSAGE'; payload: { thread: Thread; message: Message } };
 
 const initialState: AppState = {
   threads: [],
   currentThreadId: null,
   apiKey: null,
   isLoading: false,
+  selectedModel: 'gpt-5-chat-latest',
 };
 
 function appReducer(state: AppState, action: AppAction): AppState {
@@ -67,6 +72,22 @@ function appReducer(state: AppState, action: AppAction): AppState {
       };
     case 'SET_LOADING':
       return { ...state, isLoading: action.payload };
+    case 'SET_MODEL':
+      return { ...state, selectedModel: action.payload };
+    case 'CREATE_THREAD_WITH_MESSAGE':
+      const { thread, message } = action.payload;
+      const threadWithMessage: Thread = {
+        ...thread,
+        messages: [message],
+        updatedAt: Date.now(),
+      };
+      const allThreads = [...state.threads, threadWithMessage].sort((a, b) => b.updatedAt - a.updatedAt);
+      console.log('🆕 AppContext: Created thread with message atomically:', threadWithMessage.id);
+      return {
+        ...state,
+        threads: allThreads,
+        currentThreadId: threadWithMessage.id,
+      };
     default:
       return state;
   }
@@ -159,49 +180,48 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
       let currentThread = state.threads.find(t => t.id === state.currentThreadId);
       
-      // If no current thread, create a new one
-      if (!state.currentThreadId || !currentThread) {
-        console.log('🆕 AppContext: Creating new thread for first message');
-        const newThread = threadService.createNewThread();
-        dispatch({ type: 'UPDATE_THREAD', payload: newThread });
-        dispatch({ type: 'SET_CURRENT_THREAD', payload: newThread.id });
-        currentThread = newThread;
-      }
-
-      console.log('🎯 AppContext: Found current thread with', currentThread.messages.length, 'messages');
-
-      // 1) Optimistically add user's message to UI immediately
+      // Create user message
       const userMsg: Message = {
         id: uuid.v4() as string,
         role: 'user',
         content: message,
         timestamp: Date.now(),
       };
-      const optimisticThread: Thread = {
-        ...currentThread,
-        messages: [...currentThread.messages, userMsg],
-        updatedAt: Date.now(),
-        isEmpty: false,
-      };
-      console.log('⚡ AppContext: Optimistically updating thread with user message');
-      dispatch({ type: 'UPDATE_THREAD', payload: optimisticThread });
 
-      // 2) Persist user message and possibly update thread name
-      let savedThread: Thread = optimisticThread;
+      // If no current thread, create new thread with message atomically
+      if (!state.currentThreadId || !currentThread) {
+        console.log('🆕 AppContext: Creating new thread with first message atomically');
+        const newThread = threadService.createNewThread();
+        dispatch({ type: 'CREATE_THREAD_WITH_MESSAGE', payload: { thread: newThread, message: userMsg } });
+        currentThread = { ...newThread, messages: [userMsg], updatedAt: Date.now() };
+      } else {
+        // Existing thread - optimistically add user's message
+        console.log('🎯 AppContext: Adding message to existing thread with', currentThread.messages.length, 'messages');
+        const optimisticThread: Thread = {
+          ...currentThread,
+          messages: [...currentThread.messages, userMsg],
+          updatedAt: Date.now(),
+        };
+        console.log('⚡ AppContext: Optimistically updating thread with user message');
+        dispatch({ type: 'UPDATE_THREAD', payload: optimisticThread });
+        currentThread = optimisticThread;
+      }
+
+      // 2) Persist user message (for storage only, don't update UI state)
       try {
-        savedThread = await threadService.addMessage(currentThread, userMsg);
-        console.log('💾 AppContext: Persisted user message; updating thread state');
-        dispatch({ type: 'UPDATE_THREAD', payload: savedThread });
+        // Just save the current thread state with the message to storage
+        await StorageService.saveThread(currentThread);
+        console.log('💾 AppContext: Persisted thread with user message to storage');
       } catch (error) {
         console.error('❌ AppContext: Failed to persist user message:', error);
-        // Keep optimistic state even if persistence fails for now
+        // Keep optimistic state even if persistence fails
       }
 
       // 3) Request AI response
       console.log('🔄 AppContext: Setting loading to true');
       dispatch({ type: 'SET_LOADING', payload: true });
       try {
-        const finalThread = await threadService.continueConversation(savedThread);
+        const finalThread = await threadService.continueConversation(currentThread, state.selectedModel);
         console.log('✅ AppContext: Received AI response; updating thread');
         dispatch({ type: 'UPDATE_THREAD', payload: finalThread });
       } catch (error) {
@@ -225,6 +245,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     setLoading: (loading: boolean) => {
       dispatch({ type: 'SET_LOADING', payload: loading });
+    },
+
+    setModel: (model: string) => {
+      dispatch({ type: 'SET_MODEL', payload: model });
     },
   };
 

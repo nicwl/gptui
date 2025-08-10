@@ -7,6 +7,7 @@ import { RouteProp } from '@react-navigation/native';
 import { useApp } from '../context/AppContext';
 import { NavigationParams, Message } from '../types';
 import ChatSidebar from '../components/ChatSidebar';
+import ModelSelectionModal from '../components/ModelSelectionModal';
 
 type ChatScreenNavigationProp = StackNavigationProp<NavigationParams, 'Chat'>;
 type ChatScreenRouteProp = RouteProp<NavigationParams, 'Chat'>;
@@ -22,9 +23,14 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [isSidebarVisible, setIsSidebarVisible] = useState(false);
+  const [isModelModalVisible, setIsModelModalVisible] = useState(false);
   const flatListRef = useRef<FlatList>(null);
 
-  const currentThread = state.currentThreadId ? state.threads.find(t => t.id === state.currentThreadId) : null;
+  // Find current thread, but handle race conditions during thread creation
+  const currentThread = React.useMemo(() => {
+    if (!state.currentThreadId) return null;
+    return state.threads.find(t => t.id === state.currentThreadId) || null;
+  }, [state.currentThreadId, state.threads]);
 
   const toggleSidebar = () => {
     Keyboard.dismiss();
@@ -32,13 +38,45 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   };
   const hideSidebar = () => setIsSidebarVisible(false);
 
+  const getModelDisplayName = (modelId: string) => {
+    const modelMap: Record<string, string> = {
+      'gpt-5-chat-latest': 'GPT-5 Chat',
+      'gpt-4o': 'GPT-4o',
+      'gpt-4o-mini': 'GPT-4o Mini',
+      'gpt-4-turbo': 'GPT-4 Turbo',
+      'gpt-3.5-turbo': 'GPT-3.5 Turbo',
+    };
+    return modelMap[modelId] || modelId;
+  };
+
+  const handleModelSelection = () => {
+    setIsModelModalVisible(true);
+  };
+
   useEffect(() => {
     // Set up navigation header
     navigation.setOptions({
+      title: 'GPT Chat',
+      headerTitleStyle: { fontSize: 17 },
       headerRight: () => (
         <View style={styles.headerButtons}>
-          <TouchableOpacity style={styles.headerButton} onPress={handleNewChat}>
-            <Text style={styles.headerButtonText}>New Chat</Text>
+          <TouchableOpacity
+            style={styles.modelButton}
+            onPress={handleModelSelection}
+            accessibilityLabel="Select Model"
+          >
+            <Text style={styles.modelButtonText}>
+              {getModelDisplayName(state.selectedModel)}
+            </Text>
+            <Text style={styles.modelButtonArrow}>▼</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.headerButton}
+            onPress={handleNewChat}
+            accessibilityLabel="New Chat"
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Text style={[styles.headerButtonText, { fontSize: 20 }]}>＋</Text>
           </TouchableOpacity>
         </View>
       ),
@@ -51,7 +89,7 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
         </TouchableOpacity>
       ),
     });
-  }, [navigation]);
+  }, [navigation, state.selectedModel]);
 
   // Sidebar animations handled in ChatSidebar component
 
@@ -101,11 +139,13 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
     }
   };
 
-  // Derived flags/data for list behavior
-  const hasMessages = !!(currentThread && currentThread.messages && currentThread.messages.length > 0);
-  const messagesData = hasMessages
-    ? [...(currentThread?.messages || [])].reverse()
-    : [];
+  // Derived flags/data for list behavior - memoized to prevent stale renders
+  const { hasMessages, messagesData } = React.useMemo(() => {
+    const messages = currentThread?.messages || [];
+    const hasMessages = messages.length > 0;
+    const messagesData = hasMessages ? [...messages].reverse() : [];
+    return { hasMessages, messagesData };
+  }, [currentThread?.messages]);
 
   useEffect(() => {
     if (Platform.OS !== 'ios') return;
@@ -133,9 +173,16 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
       ]}>
         {item.content}
       </Text>
-      <Text style={styles.messageTime}>
-        {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-      </Text>
+      <View style={styles.messageFooter}>
+        <Text style={styles.messageTime}>
+          {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+        </Text>
+        {item.model && item.role === 'assistant' && (
+          <Text style={styles.messageModel}>
+            {getModelDisplayName(item.model)}
+          </Text>
+        )}
+      </View>
     </View>
   );
 
@@ -224,6 +271,14 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
           }
         }}
       />
+
+      {/* Model Selection Modal */}
+      <ModelSelectionModal
+        visible={isModelModalVisible}
+        selectedModel={state.selectedModel}
+        onSelectModel={actions.setModel}
+        onClose={() => setIsModelModalVisible(false)}
+      />
     </KeyboardAvoidingView>
   );
 };
@@ -245,6 +300,25 @@ const styles = StyleSheet.create({
   headerButtonText: {
     color: '#007AFF',
     fontSize: 16,
+  },
+  modelButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: '#F2F2F7',
+    borderRadius: 8,
+  },
+  modelButtonText: {
+    color: '#007AFF',
+    fontSize: 14,
+    fontWeight: '600',
+    marginRight: 4,
+  },
+  modelButtonArrow: {
+    color: '#007AFF',
+    fontSize: 10,
   },
   messagesList: {
     flex: 1,
@@ -282,10 +356,20 @@ const styles = StyleSheet.create({
   assistantMessageText: {
     color: '#000000',
   },
+  messageFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+  },
   messageTime: {
     fontSize: 12,
-    marginTop: 4,
     opacity: 0.6,
+  },
+  messageModel: {
+    fontSize: 10,
+    opacity: 0.5,
+    marginLeft: 8,
+    fontStyle: 'italic',
   },
   emptyState: {
     flex: 1,

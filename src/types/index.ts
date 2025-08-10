@@ -3,6 +3,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: number;
+  model?: string; // Model used to generate this message (for assistant messages)
 }
 
 export interface Thread {
@@ -11,7 +12,6 @@ export interface Thread {
   messages: Message[];
   createdAt: number;
   updatedAt: number;
-  isEmpty: boolean;
 }
 
 export interface AppState {
@@ -19,6 +19,7 @@ export interface AppState {
   currentThreadId: string | null;
   apiKey: string | null;
   isLoading: boolean;
+  selectedModel: string;
 }
 
 export interface OpenAIResponse {

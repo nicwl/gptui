@@ -19,7 +19,6 @@ export class ThreadService {
       messages: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      isEmpty: true,
     };
   }
 
@@ -28,19 +27,16 @@ export class ThreadService {
       ...thread,
       messages: [...thread.messages, message],
       updatedAt: Date.now(),
-      isEmpty: false,
     };
 
-    // Save to storage if thread is not empty; StorageService will sort on load,
+    // Save to storage; StorageService will sort on load,
     // but we keep updatedAt accurate here for proper ordering
-    if (!updatedThread.isEmpty) {
-      await StorageService.saveThread(updatedThread);
-    }
+    await StorageService.saveThread(updatedThread);
 
     return updatedThread;
   }
 
-  async continueConversation(thread: Thread): Promise<Thread> {
+  async continueConversation(thread: Thread, selectedModel: string = 'gpt-5-chat-latest'): Promise<Thread> {
     // Assumes the latest message in the thread is from the user
     let updatedThread = thread;
     try {
@@ -48,14 +44,15 @@ export class ThreadService {
       console.log('🤖 ThreadService: Continuing conversation...');
       const preAiUserOnly = updatedThread.messages.length === 1 && updatedThread.messages[0].role === 'user';
       const userFirstMessage = preAiUserOnly ? updatedThread.messages[0].content : null;
-      const aiResponse = await this.openAIService.sendMessage(updatedThread.messages);
+      const aiResponse = await this.openAIService.sendMessage(updatedThread.messages, selectedModel);
       console.log('✅ ThreadService: Received AI response:', aiResponse);
 
       const aiMsg: Message = {
         id: uuid.v4() as string,
         role: 'assistant',
-        content: aiResponse,
+        content: aiResponse.content,
         timestamp: Date.now(),
+        model: aiResponse.model,
       };
 
       // Add AI message
@@ -76,6 +73,18 @@ export class ThreadService {
           console.warn('Failed to generate thread name from pair:', e);
         }
       }
+
+      // Milestones: re-evaluate name at 4, 8, 16, 32, 64, 128 messages
+      const milestones = new Set([4, 8, 16, 32, 64, 128]);
+      if (this.openAIService.hasApiKey() && milestones.has(updatedThread.messages.length)) {
+        try {
+          const newName = await this.openAIService.generateThreadNameFromHistory(updatedThread.messages);
+          updatedThread = { ...updatedThread, name: newName };
+          await StorageService.saveThread(updatedThread);
+        } catch (e) {
+          console.warn('Failed to regenerate thread name from history:', e);
+        }
+      }
     } catch (error) {
       console.error('❌ ThreadService: Failed to continue conversation:', error);
 
@@ -85,6 +94,7 @@ export class ThreadService {
         role: 'assistant',
         content: 'Sorry, I encountered an error while processing your request. Please check your API key and try again.',
         timestamp: Date.now(),
+        model: 'error',
       };
 
       console.log('📝 ThreadService: Adding error message to thread');
@@ -115,14 +125,15 @@ export class ThreadService {
       // Get AI response
       console.log('🤖 ThreadService: Requesting AI response...');
       console.log('🔧 ThreadService: About to call sendMessage on OpenAIService:', this.openAIService);
-      const aiResponse = await this.openAIService.sendMessage(updatedThread.messages);
+      const aiResponse = await this.openAIService.sendMessage(updatedThread.messages, 'gpt-5-chat-latest');
       console.log('✅ ThreadService: Received AI response:', aiResponse);
       
       const aiMsg: Message = {
         id: uuid.v4() as string,
         role: 'assistant',
-        content: aiResponse,
+        content: aiResponse.content,
         timestamp: Date.now(),
+        model: aiResponse.model,
       };
 
       // Add AI message
