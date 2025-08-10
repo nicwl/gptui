@@ -8,6 +8,7 @@ import { useApp } from '../context/AppContext';
 import { NavigationParams, Message } from '../types';
 import ChatSidebar from '../components/ChatSidebar';
 import { ModelSelectionModal, AVAILABLE_MODELS } from '../components/ModelSelectionModal.tsx';
+import Markdown from 'react-native-markdown-display';
 
 type ChatScreenNavigationProp = StackNavigationProp<NavigationParams, 'Chat'>;
 type ChatScreenRouteProp = RouteProp<NavigationParams, 'Chat'>;
@@ -18,7 +19,7 @@ interface Props {
 }
 
 // Helper component to render streaming text with character-by-character reveal
-const StreamingText = ({ content, isStreaming, style }: { content: string, isStreaming: boolean, style: any }) => {
+const StreamingText = ({ content, isStreaming, style, isAssistant }: { content: string, isStreaming: boolean, style: any, isAssistant?: boolean }) => {
   const [revealedLength, setRevealedLength] = useState(0);
   const [hasStartedRevealing, setHasStartedRevealing] = useState(false);
   const [targetEndTime, setTargetEndTime] = useState<number | null>(null);
@@ -27,7 +28,7 @@ const StreamingText = ({ content, isStreaming, style }: { content: string, isStr
   useEffect(() => {
     // Lock in the target end time when streaming transitions from true to false
     if (wasStreaming && !isStreaming) {
-      const endTime = performance.now() + 5000; // 5 seconds from now
+      const endTime = performance.now() + 10000; // 10 seconds from now
       setTargetEndTime(endTime);
     }
     setWasStreaming(isStreaming);
@@ -50,8 +51,8 @@ const StreamingText = ({ content, isStreaming, style }: { content: string, isStr
         const deltaTime = now - lastUpdateTime;
         
         if (isStreaming) {
-          // During streaming: reveal 1 character every 3ms
-          if (deltaTime >= 3) {
+          // During streaming: reveal 1 character every 2ms
+          if (deltaTime >= 2) {
             setRevealedLength(prev => Math.min(prev + 1, content.length));
             lastUpdateTime = now;
           }
@@ -62,12 +63,12 @@ const StreamingText = ({ content, isStreaming, style }: { content: string, isStr
           
           if (remainingChars > 0) {
             // Only reveal if enough time has passed (maintain 3ms minimum interval)
-            if (deltaTime >= 3) {
+            if (deltaTime >= 2) {
               // Calculate minimum characters per frame to finish on time
               const framesRemaining = Math.max(1, Math.ceil(remainingTime / 16)); // ~60fps
               const minCharsPerFrame = Math.ceil(remainingChars / framesRemaining);
               
-              // At streaming speed, reveal 1 char per 3ms interval
+              // At streaming speed, reveal 1 char per 2ms interval
               const streamingSpeedChars = 1;
               const charsToReveal = Math.max(streamingSpeedChars, minCharsPerFrame);
               
@@ -101,13 +102,48 @@ const StreamingText = ({ content, isStreaming, style }: { content: string, isStr
     }
   }, [isStreaming, hasStartedRevealing]);
   
+  // Markdown styling for assistant messages
+  const markdownStyles = {
+    body: style,
+    code_inline: {
+      backgroundColor: 'rgba(0,0,0,0.1)',
+      paddingHorizontal: 4,
+      paddingVertical: 2,
+      borderRadius: 3,
+      fontFamily: 'Menlo',
+      fontSize: style.fontSize * 0.9,
+    },
+    code_block: {
+      backgroundColor: 'rgba(0,0,0,0.1)',
+      padding: 8,
+      borderRadius: 6,
+      fontFamily: 'Menlo',
+      fontSize: style.fontSize * 0.9,
+    },
+    heading1: { ...style, fontSize: style.fontSize * 1.3, fontWeight: 'bold', marginVertical: 4 },
+    heading2: { ...style, fontSize: style.fontSize * 1.2, fontWeight: 'bold', marginVertical: 3 },
+    heading3: { ...style, fontSize: style.fontSize * 1.1, fontWeight: 'bold', marginVertical: 2 },
+    strong: { ...style, fontWeight: 'bold' },
+    em: { ...style, fontStyle: 'italic' },
+    list_item: { ...style, marginVertical: 1 },
+    bullet_list: { marginVertical: 4 },
+    ordered_list: { marginVertical: 4 },
+  };
+
   // If we haven't started revealing yet (before streaming begins), show full content
   if (!hasStartedRevealing) {
+    if (isAssistant) {
+      return <Markdown style={markdownStyles}>{content}</Markdown>;
+    }
     return <Text style={style}>{content}</Text>;
   }
 
   // Show only the revealed portion of the content
   const visibleContent = content.slice(0, revealedLength);
+  
+  if (isAssistant) {
+    return <Markdown style={markdownStyles}>{visibleContent}</Markdown>;
+  }
   
   return (
     <Text style={style}>
@@ -254,6 +290,7 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
       <StreamingText 
         content={item.content}
         isStreaming={item.isStreaming || false}
+        isAssistant={item.role === 'assistant'}
         style={[
           styles.messageText,
           item.role === 'user' ? styles.userMessageText : styles.assistantMessageText
