@@ -9,6 +9,14 @@ import { NavigationParams, Message } from '../types';
 import ChatSidebar from '../components/ChatSidebar';
 import { ModelSelectionModal, AVAILABLE_MODELS } from '../components/ModelSelectionModal.tsx';
 import Markdown from 'react-native-markdown-display';
+import MarkdownIt from 'markdown-it';
+
+// Create a single markdown parser instance
+const mdParser = new MarkdownIt({
+  html: false,
+  breaks: true,
+  linkify: true,
+});
 
 type ChatScreenNavigationProp = StackNavigationProp<NavigationParams, 'Chat'>;
 type ChatScreenRouteProp = RouteProp<NavigationParams, 'Chat'>;
@@ -24,6 +32,91 @@ const StreamingText = ({ content, isStreaming, style, isAssistant }: { content: 
   const [hasStartedRevealing, setHasStartedRevealing] = useState(false);
   const [targetEndTime, setTargetEndTime] = useState<number | null>(null);
   const [wasStreaming, setWasStreaming] = useState(false);
+  
+  // Maintain parsed tokens for incremental rendering  
+  const [fullTokens, setFullTokens] = useState<any[]>([]);
+  const [parsedContent, setParsedContent] = useState('');
+  
+  // Parse content as it streams in - update tokens when content changes
+  useEffect(() => {
+    if (isAssistant && content) {
+      try {
+        const tokens = mdParser.parse(content, {});
+        setFullTokens(tokens);
+        setParsedContent(content);
+      } catch (error) {
+        console.warn('Failed to parse content:', error);
+        setFullTokens([]);
+      }
+    }
+  }, [content, isAssistant]);
+  
+  // Generate visible content based on revealed length but using the stable AST
+  const visibleMarkdown = React.useMemo(() => {
+    if (!isAssistant || fullTokens.length === 0) {
+      return null;
+    }
+    
+    // Extract text content from tokens up to revealed length
+    let totalLength = 0;
+    let visibleText = '';
+    
+    for (const token of fullTokens) {
+      
+      if (token.type === 'text' || token.type === 'code_inline') {
+        const tokenContent = token.content || '';
+        if (totalLength + tokenContent.length <= revealedLength) {
+          visibleText += tokenContent;
+          totalLength += tokenContent.length;
+          console.log('Added full token:', tokenContent, 'totalLength now:', totalLength);
+        } else {
+          // Partial token content
+          const remainingChars = revealedLength - totalLength;
+          if (remainingChars > 0) {
+            const partial = tokenContent.slice(0, remainingChars);
+            visibleText += partial;
+            console.log('Added partial token:', partial, 'from:', tokenContent);
+          }
+          break;
+        }
+      } else if (token.type === 'softbreak' || token.type === 'hardbreak') {
+        if (totalLength < revealedLength) {
+          visibleText += '\n';
+          totalLength += 1;
+        } else {
+          break;
+        }
+      } else if (token.children && token.children.length > 0) {
+        // Process nested tokens (like paragraph content)
+        for (const child of token.children) {
+          if (child.type === 'text' || child.type === 'code_inline') {
+            const childContent = child.content || '';
+            if (totalLength + childContent.length <= revealedLength) {
+              visibleText += childContent;
+              totalLength += childContent.length;
+            } else {
+              // Partial child content
+              const remainingChars = revealedLength - totalLength;
+              if (remainingChars > 0) {
+                const partial = childContent.slice(0, remainingChars);
+                visibleText += partial;
+              }
+              return visibleText; // Exit early when we reach the limit
+            }
+          } else if (child.type === 'softbreak' || child.type === 'hardbreak') {
+            if (totalLength < revealedLength) {
+              visibleText += '\n';
+              totalLength += 1;
+            } else {
+              return visibleText;
+            }
+          }
+        }
+      }
+    }
+    
+    return visibleText;
+  }, [fullTokens, revealedLength, isAssistant]);
   
   useEffect(() => {
     // Lock in the target end time when streaming transitions from true to false
@@ -120,6 +213,8 @@ const StreamingText = ({ content, isStreaming, style, isAssistant }: { content: 
     };
   }, []);
   
+
+
   // Memoize markdown styles to prevent recreation on every render
   const markdownStyles = React.useMemo(() => ({
     body: style,
@@ -148,21 +243,41 @@ const StreamingText = ({ content, isStreaming, style, isAssistant }: { content: 
     ordered_list: { marginVertical: 4 },
   }), [style]);
 
-  // If we haven't started revealing yet (before streaming begins), show full content
-  if (!hasStartedRevealing) {
-    if (isAssistant) {
+  // Use incremental AST approach for assistant messages
+  if (isAssistant) {
+    if (!hasStartedRevealing) {
+      // Before streaming starts, show full content with standard markdown
       return <Markdown style={markdownStyles}>{content}</Markdown>;
+    } else if (revealedLength >= content.length) {
+      // Streaming complete - show full content with markdown for final formatting
+      return <Markdown style={markdownStyles}>{content}</Markdown>;
+    } else {
+      // During streaming - show markdown of the revealed portion
+      // Use the character count from AST extraction but render original markdown
+      const textLength = visibleMarkdown !== null ? visibleMarkdown.length : revealedLength;
+      
+      // Find the position in the original markdown that corresponds to our text length
+      // This preserves markdown formatting while showing progressive reveal
+      let markdownPos = 0;
+      let textPos = 0;
+      
+      // Walk through the original content to find where our visible text ends
+      while (markdownPos < content.length && textPos < textLength) {
+        const char = content[markdownPos];
+        // Skip markdown markup characters when counting visible text
+        if (char !== '*' && char !== '_' && char !== '`') {
+          textPos++;
+        }
+        markdownPos++;
+      }
+      
+      const visibleMarkdownContent = content.slice(0, markdownPos);
+      return <Markdown style={markdownStyles}>{visibleMarkdownContent}</Markdown>;
     }
-    return <Text style={style}>{content}</Text>;
   }
 
-  // Show only the revealed portion of the content
-  const visibleContent = content.slice(0, revealedLength);
-  
-  if (isAssistant) {
-    return <Markdown style={markdownStyles}>{visibleContent}</Markdown>;
-  }
-  
+  // User messages - always plain text with character reveal
+  const visibleContent = !hasStartedRevealing ? content : content.slice(0, revealedLength);
   return (
     <Text style={style}>
       {visibleContent}
