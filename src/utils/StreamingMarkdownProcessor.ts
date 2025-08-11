@@ -18,7 +18,7 @@
  */
 
 import { MarkdownTokenizer } from './MarkdownTokenizer';
-import { MarkdownParser, MarkdownASTNode } from './MarkdownParser';
+import { MarkdownParser, MarkdownASTNode, hasContent, hasChildren } from './MarkdownParser';
 
 export class StreamingMarkdownProcessor {
   private tokenizer = new MarkdownTokenizer();
@@ -40,8 +40,8 @@ export class StreamingMarkdownProcessor {
     // Determine newly visible text
     const newlyVisibleText = content.substring(this.processedChars, actualVisibleLength);
     
-    if (newlyVisibleText.length === 0) {
-      return this.createTentativeAST(content, actualVisibleLength);
+    if (newlyVisibleText.length === 0 ) {
+        return this.createTentativeAST();
     }
     
     // Process character by character through the pipeline
@@ -60,13 +60,13 @@ export class StreamingMarkdownProcessor {
     this.processedChars = actualVisibleLength;
     
     // Create tentative AST with extra content
-    const tentativeAST = this.createTentativeAST(content, actualVisibleLength);
+    const tentativeAST = this.createTentativeAST();
     
     // Notify of AST update
     if (this.onASTUpdate && newTokens.length > 0) {
-      this.onASTUpdate(tentativeAST.children || []);
+      this.onASTUpdate(tentativeAST.type === 'document' ? tentativeAST.children : []);
     }
-    
+    // console.log('🔥tentativeAST',tentativeAST);
     return tentativeAST;
   }
   
@@ -98,7 +98,7 @@ export class StreamingMarkdownProcessor {
     
     // Final AST update
     if (this.onASTUpdate) {
-      this.onASTUpdate(finalAST.children || []);
+      this.onASTUpdate(finalAST.type === 'document' ? finalAST.children : []);
     }
     
     return finalAST;
@@ -123,7 +123,7 @@ export class StreamingMarkdownProcessor {
   /**
    * Create tentative AST with buffered content for smooth rendering
    */
-  private createTentativeAST(content: string, visibleLength: number): MarkdownASTNode {
+  private createTentativeAST(): MarkdownASTNode {
     // Get current AST
     const currentAST = this.parser.getASTReference();
     
@@ -157,6 +157,54 @@ export class StreamingMarkdownProcessor {
   }
   
   /**
+   * Create tentative AST with extra content, copying only the minimal path needed
+   */
+  private createTentativeASTWithContent(ast: MarkdownASTNode, extraContent: string): MarkdownASTNode {
+    // If it's a text node, create a copy with the extra content
+    if (ast.type === 'text') {
+      return {
+        ...ast,
+        content: ast.content + extraContent
+      };
+    }
+    
+    // If it's a content node (but not text), wrap it
+    if (ast.type === 'code_block' || ast.type === 'code_inline') {
+      // For content nodes, we need to create a proper container
+      return {
+        type: 'document',
+        children: [{
+          type: 'text',
+          content: ast.content + extraContent
+        }]
+      } satisfies MarkdownASTNode;
+    }
+
+    // Now we know it's a container node
+    if (ast.children.length === 0) {
+      return {
+        ...ast,
+        children: [{
+          type: 'text',
+          content: extraContent
+        }]
+      } satisfies MarkdownASTNode;
+    }
+
+    // Find the rightmost child and create tentative version
+    const children = [...ast.children];
+    const lastChild = children[children.length - 1];
+    
+    // Recursively handle the last child
+    children[children.length - 1] = this.createTentativeASTWithContent(lastChild, extraContent);
+    
+    return {
+      ...ast,
+      children
+    } satisfies MarkdownASTNode;
+  }
+
+  /**
    * Add tentative content to the rightmost text node in AST
    */
   private addTentativeContent(ast: MarkdownASTNode, extraContent: string): MarkdownASTNode {
@@ -164,101 +212,9 @@ export class StreamingMarkdownProcessor {
       return ast;
     }
     
-    // Create shallow copy of the AST
-    const tentativeAST: MarkdownASTNode = {
-      ...ast,
-      children: ast.children ? [...ast.children] : []
-    };
-    
-    // Find the rightmost text node to append content to
-    const rightmostTextNode = this.findRightmostTextNode(tentativeAST);
-    
-    if (rightmostTextNode) {
-      // Add extra content to existing text node
-      rightmostTextNode.content = (rightmostTextNode.content || '') + extraContent;
-    } else {
-      // No existing text node - need to create one in appropriate container
-      this.addTentativeTextNode(tentativeAST, extraContent);
-    }
+    // Create a shallow copy of the root and copy only the path to the rightmost text node
+    const tentativeAST = this.createTentativeASTWithContent(ast, extraContent);
     
     return tentativeAST;
-  }
-  
-  /**
-   * Find the rightmost text node in the AST for appending content
-   */
-  private findRightmostTextNode(ast: MarkdownASTNode): MarkdownASTNode | null {
-    if (ast.type === 'text') {
-      return ast;
-    }
-    
-    if (ast.children && ast.children.length > 0) {
-      // Search from right to left
-      for (let i = ast.children.length - 1; i >= 0; i--) {
-        const found = this.findRightmostTextNode(ast.children[i]);
-        if (found) {
-          return found;
-        }
-      }
-    }
-    
-    return null;
-  }
-  
-  /**
-   * Check if the tokenizer is in a safe context for adding buffered chars as tentative text
-   */
-  private isInSafeTextContext(): boolean {
-    // For now, be conservative and only allow tentative text in basic text/paragraph contexts
-    // This prevents issues with language specifiers in code blocks, etc.
-    const tokenizerState = this.tokenizer.getState();
-    
-    // Safe states where buffered characters can be shown as tentative text
-    const safeStates = ['TEXT', 'LINE_START'];
-    return safeStates.includes(tokenizerState);
-  }
-
-  /**
-   * Add a tentative text node to the AST when no existing text node is found
-   */
-  private addTentativeTextNode(ast: MarkdownASTNode, content: string): void {
-    // Find or create a paragraph to hold the text
-    let targetContainer = ast;
-    
-    if (ast.type === 'document') {
-      // Check if there's already a paragraph at the end
-      if (ast.children && ast.children.length > 0) {
-        const lastChild = ast.children[ast.children.length - 1];
-        if (lastChild.type === 'paragraph') {
-          targetContainer = lastChild;
-        } else {
-          // Create new paragraph
-          const newParagraph: MarkdownASTNode = {
-            type: 'paragraph',
-            children: []
-          };
-          ast.children!.push(newParagraph);
-          targetContainer = newParagraph;
-        }
-      } else {
-        // Create first paragraph
-        const newParagraph: MarkdownASTNode = {
-          type: 'paragraph',
-          children: []
-        };
-        ast.children = [newParagraph];
-        targetContainer = newParagraph;
-      }
-    }
-    
-    // Add text node to target container
-    if (!targetContainer.children) {
-      targetContainer.children = [];
-    }
-    
-    targetContainer.children.push({
-      type: 'text',
-      content
-    });
   }
 }

@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, Alert, KeyboardAvoidingView, Platform, Keyboard } from 'react-native';
+import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, Alert, KeyboardAvoidingView, Platform, Keyboard, Modal } from 'react-native';
+import Clipboard from '@react-native-clipboard/clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { useHeaderHeight } from '@react-navigation/elements';
@@ -9,7 +10,7 @@ import { NavigationParams, Message } from '../types';
 import ChatSidebar from '../components/ChatSidebar';
 import { ModelSelectionModal, AVAILABLE_MODELS } from '../components/ModelSelectionModal.tsx';
 import { StreamingMarkdownProcessor } from '../utils/StreamingMarkdownProcessor';
-import { MarkdownASTNode } from '../utils/MarkdownParser';
+import { MarkdownASTNode, hasContent, hasChildren } from '../utils/MarkdownParser';
 
 
 type ChatScreenNavigationProp = StackNavigationProp<NavigationParams, 'Chat'>;
@@ -26,70 +27,105 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
   const [hasStartedRevealing, setHasStartedRevealing] = useState(false);
   const [targetEndTime, setTargetEndTime] = useState<number | null>(null);
   const [wasStreaming, setWasStreaming] = useState(false);
-  
+
+
+
   // Streaming markdown parser state
   const [currentAST, setCurrentAST] = useState<MarkdownASTNode[]>([]);
   const lastProcessedContentRef = useRef('');
-  
-  const streamingProcessor = useMemo(() => 
-    new StreamingMarkdownProcessor((ast) => setCurrentAST(ast)),
+
+  const streamingProcessor = useMemo(() =>
+    new StreamingMarkdownProcessor(),
     []
   );
-  
+
   // Reset parser only when we have a completely new message (different message ID)
   const lastMessageIdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
+    console.log('📝 MessageId effect:', {
+      messageId: messageId?.slice(-8),
+      lastMessageId: lastMessageIdRef.current?.slice(-8),
+      isAssistant,
+      willReset: isAssistant && messageId && messageId !== lastMessageIdRef.current
+    });
     if (isAssistant && messageId && messageId !== lastMessageIdRef.current) {
+      console.log('🔄 Resetting streaming processor for new message');
       streamingProcessor.reset();
       setCurrentAST([]);
       lastProcessedContentRef.current = '';
       lastMessageIdRef.current = messageId;
     }
   }, [messageId, isAssistant]);
-  
+
   // Process characters incrementally as they're revealed
   useEffect(() => {
-    if (isAssistant && content && hasStartedRevealing && revealedLength > 0) {
+    console.log('🎯 Character processing effect:', {
+      messageId: messageId?.slice(-8),
+      isAssistant,
+      hasContent: !!content,
+      contentLength: content.length,
+      hasStartedRevealing,
+      revealedLength,
+      willProcess: isAssistant && content && hasStartedRevealing && revealedLength > 0
+    });
+    if (isAssistant && content && content.length > 0 && hasStartedRevealing && revealedLength > 0) {
       // Use Unicode-aware character slicing to avoid breaking emojis
       const contentChars = [...content]; // Convert to array of Unicode characters
       const visibleChars = contentChars.slice(0, revealedLength);
       const visibleContent = visibleChars.join('');
-      
+
       // Process the full content up to the visible length
       const newAST = streamingProcessor.appendText(content, revealedLength);
-      setCurrentAST(newAST.children || []);
+      setCurrentAST(newAST.type === 'document' ? newAST.children : []);
       lastProcessedContentRef.current = visibleContent;
     }
-  }, [revealedLength]);
-  
+  }, [revealedLength, content, isAssistant, hasStartedRevealing, messageId]);
+
   useEffect(() => {
+    console.log('🕒 Streaming state effect:', {
+      messageId: messageId?.slice(-8),
+      isStreaming,
+      wasStreaming,
+      willSetEndTime: wasStreaming && !isStreaming
+    });
     // Lock in the target end time when streaming transitions from true to false
     if (wasStreaming && !isStreaming) {
+      console.log('⏰ Setting target end time');
       const endTime = performance.now() + 10000; // 10 seconds from now
       setTargetEndTime(endTime);
     }
     setWasStreaming(isStreaming);
   }, [isStreaming, wasStreaming]);
-  
+
   useEffect(() => {
     // Use Unicode-aware character counting
     const contentLength = [...content].length; // Unicode character count
-    
+    console.log('🎬 Animation effect:', {
+      messageId: messageId?.slice(-8),
+      contentLength,
+      revealedLength,
+      isStreaming,
+      hasStartedRevealing,
+      targetEndTime: !!targetEndTime,
+      shouldAnimate: (isStreaming || revealedLength < contentLength) && contentLength > revealedLength
+    });
+
     // Start revealing when streaming begins or continue if there's more content to reveal
-    if ((isStreaming || revealedLength < contentLength) && contentLength > revealedLength) {
-      if (isStreaming && !hasStartedRevealing) {
+    if (contentLength > 0 && (isStreaming || revealedLength < contentLength) && contentLength > revealedLength) {
+      if (isStreaming && !hasStartedRevealing && contentLength > 0) {
+        console.log('🚀 Starting character reveal animation');
         setHasStartedRevealing(true);
         setRevealedLength(0);
         setTargetEndTime(null); // Reset target time for new streaming
       }
-      
+
       let lastUpdateTime = performance.now();
       let animationId: number;
-      
+
       const updateReveal = () => {
         const now = performance.now();
         const deltaTime = now - lastUpdateTime;
-        
+
         if (isStreaming) {
           // During streaming: reveal 1 character every 2ms
           if (deltaTime >= 2) {
@@ -100,24 +136,24 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
           // After streaming: maintain or increase speed, never slow down
           const remainingTime = Math.max(1, targetEndTime - now);
           const remainingChars = contentLength - revealedLength;
-          
+
           if (remainingChars > 0) {
             // Only reveal if enough time has passed (maintain 3ms minimum interval)
             if (deltaTime >= 2) {
               // Calculate minimum characters per frame to finish on time
               const framesRemaining = Math.max(1, Math.ceil(remainingTime / 16)); // ~60fps
               const minCharsPerFrame = Math.ceil(remainingChars / framesRemaining);
-              
+
               // At streaming speed, reveal 1 char per 2ms interval
               const streamingSpeedChars = 1;
               const charsToReveal = Math.max(streamingSpeedChars, minCharsPerFrame);
-              
+
               setRevealedLength(prev => Math.min(prev + charsToReveal, contentLength));
               lastUpdateTime = now;
             }
           }
         }
-        
+
         // Continue animation if there's more to reveal AND component is still mounted
         const shouldContinue = revealedLength < contentLength && (isStreaming || targetEndTime);
         if (shouldContinue) {
@@ -130,9 +166,9 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
           }
         }
       };
-      
+
       animationId = requestAnimationFrame(updateReveal);
-      
+
       return () => {
         if (animationId) {
           cancelAnimationFrame(animationId);
@@ -140,7 +176,7 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
       };
     }
   }, [content, isStreaming, revealedLength, hasStartedRevealing, targetEndTime]);
-  
+
   useEffect(() => {
     // Reset when component receives new content and streaming starts
     if (isStreaming && !hasStartedRevealing) {
@@ -159,15 +195,16 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
       }
     };
   }, []);
-  
+
   // Custom AST renderer for streaming markdown
   const renderAST = React.useCallback((ast: MarkdownASTNode[]): React.ReactNode => {
+    const unicodeStyle = { fontFamily: Platform.OS === 'ios' ? 'System' : 'Roboto' };
     return ast.map((node, index) => {
       switch (node.type) {
         case 'paragraph':
           return (
             <Text key={index} style={style}>
-              {node.children?.map((child, childIndex) => renderASTNode(child, childIndex))}
+              {renderAST(node.children || [])}
             </Text>
           );
         case 'heading':
@@ -182,76 +219,111 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
           ];
           return (
             <Text key={index} style={headingStyle}>
+              {renderAST(node.children)}
+            </Text>
+          );
+        case 'text':
+          return <Text key={index} style={unicodeStyle}>{node.content}</Text>;
+        case 'strong':
+          return <Text key={index} style={[unicodeStyle, { fontWeight: 'bold' }]}>{renderAST(node.children)}</Text>;
+        case 'emphasis':
+          return <Text key={index} style={[unicodeStyle, { fontStyle: 'italic' }]}>{renderAST(node.children)}</Text>;
+        case 'code_inline':
+          return (
+            <Text
+              key={index}
+              style={[
+                unicodeStyle,
+                {
+                  fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                  backgroundColor: 'rgba(0,0,0,0.1)',
+                  paddingHorizontal: 4,
+                  borderRadius: 3
+                }
+              ]}
+            >
               {node.content}
             </Text>
           );
+        case 'link':
+          return (
+            <Text
+              key={index}
+              style={[
+                unicodeStyle,
+                {
+                  color: '#007AFF',
+                  textDecorationLine: 'underline'
+                }
+              ]}
+            >
+              {renderAST(node.children)}
+            </Text>
+          );
+        case 'code_block':
+          return (
+            <View key={index} style={{ marginVertical: 8 }}>
+              <View
+                style={{
+                  backgroundColor: 'rgba(0,0,0,0.05)',
+                  borderRadius: 6,
+                  padding: 12,
+                  borderLeftWidth: 3,
+                  borderLeftColor: '#007AFF'
+                }}
+              >
+                <Text
+                  style={[
+                    unicodeStyle,
+                    {
+                      fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                      fontSize: style.fontSize * 0.9,
+                      lineHeight: style.fontSize * 1.4
+                    }
+                  ]}
+                >
+                  {node.content}
+                </Text>
+              </View>
+            </View>
+          );
+        case 'document':
+          return <View key={index} style={style}>{renderAST(node.children)}</View>;
+        case 'paragraph':
+          return <View key={index} style={style}>{renderAST(node.children)}</View>;
         default:
-          return renderASTNode(node, index);
+          node satisfies never;
       }
     });
   }, [style]);
-
-  const renderASTNode = React.useCallback((node: MarkdownASTNode, key: number): React.ReactNode => {
-    const unicodeStyle = { fontFamily: Platform.OS === 'ios' ? 'System' : 'Roboto' };
-    
-    switch (node.type) {
-      case 'text':
-        return <Text key={key} style={unicodeStyle}>{node.content}</Text>;
-      case 'strong':
-        return <Text key={key} style={[unicodeStyle, { fontWeight: 'bold' }]}>{node.content}</Text>;
-      case 'emphasis':
-        return <Text key={key} style={[unicodeStyle, { fontStyle: 'italic' }]}>{node.content}</Text>;
-      case 'code_inline':
-        return (
-          <Text 
-            key={key} 
-            style={[
-              unicodeStyle,
-              { 
-                fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-                backgroundColor: 'rgba(0,0,0,0.1)', 
-                paddingHorizontal: 4, 
-                borderRadius: 3 
-              }
-            ]}
-          >
-            {node.content}
-          </Text>
-        );
-      case 'link':
-        return (
-          <Text 
-            key={key} 
-            style={[
-              unicodeStyle,
-              { 
-                color: '#007AFF', 
-                textDecorationLine: 'underline' 
-              }
-            ]}
-          >
-            {node.content}
-          </Text>
-        );
-      default:
-        return <Text key={key} style={unicodeStyle}>{node.content || ''}</Text>;
-    }
-  }, []);
 
 
 
   // Use streaming AST renderer for assistant messages
   if (isAssistant) {
+    console.log('🎭 Render decision:', {
+      messageId: messageId?.slice(-8),
+      hasStartedRevealing,
+      revealedLength,
+      contentLength: [...content].length,
+      currentASTNodes: currentAST.length
+    });
+
     if (!hasStartedRevealing) {
       // Before streaming starts, show full content with standard markdown
+      console.log('📄 Using finalize for initial render');
       const initialAST = streamingProcessor.finalize(content);
-      return <>{renderAST(initialAST.children || [])}</>;
-    } else if (revealedLength >= [...content].length) {
+      console.log('📄 Initial AST:', { nodeCount: initialAST.type === 'document' ? initialAST.children.length : 0 });
+      return <>{renderAST(initialAST.type === 'document' ? initialAST.children : [])}</>;
+    } else if (revealedLength >= [...content].length && !isStreaming && wasStreaming) {
       // Streaming complete - finalize and show full content with standard markdown
+      console.log('✅ Using finalize for complete render');
       const finalAST = streamingProcessor.finalize(content);
-      return <>{renderAST(finalAST.children || [])}</>;
+      console.log('✅ Final AST:', { nodeCount: finalAST.type === 'document' ? finalAST.children.length : 0 });
+      return <>{renderAST(finalAST.type === 'document' ? finalAST.children : [])}</>;
     } else {
       // During streaming - render from incremental AST
+      console.log('🔄 Using incremental AST');
       return <>{renderAST(currentAST)}</>;
     }
   }
@@ -272,6 +344,7 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   const [_isTyping, setIsTyping] = useState(false);
   const [isSidebarVisible, setIsSidebarVisible] = useState(false);
   const [isModelModalVisible, setIsModelModalVisible] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ visible: boolean; message: Message | null }>({ visible: false, message: null });
   const flatListRef = useRef<FlatList>(null);
 
   // Find current thread, but handle race conditions during thread creation
@@ -286,10 +359,10 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   };
   const hideSidebar = () => setIsSidebarVisible(false);
 
-      const getModelDisplayName = (modelId: string) => {
-      const model = AVAILABLE_MODELS.find((m: any) => m.id === modelId);
-      return model?.name || modelId;
-    };
+  const getModelDisplayName = (modelId: string) => {
+    const model = AVAILABLE_MODELS.find((m: any) => m.id === modelId);
+    return model?.name || modelId;
+  };
 
   const handleModelSelection = () => {
     setIsModelModalVisible(true);
@@ -395,12 +468,31 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   }, [messages, hasMessages]);
 
 
+  const handleLongPressMessage = (message: Message) => {
+    setContextMenu({ visible: true, message });
+  };
+
+  const handleCopyMessage = () => {
+    if (contextMenu.message) {
+      Clipboard.setString(contextMenu.message.content);
+      setContextMenu({ visible: false, message: null });
+    }
+  };
+
+  const closeContextMenu = () => {
+    setContextMenu({ visible: false, message: null });
+  };
+
   const renderMessage = ({ item }: { item: Message }) => (
-    <View style={[
-      styles.messageContainer,
-      item.role === 'user' ? styles.userMessage : styles.assistantMessage
-    ]}>
-      <StreamingText 
+    <TouchableOpacity
+      style={[
+        styles.messageContainer,
+        item.role === 'user' ? styles.userMessage : styles.assistantMessage
+      ]}
+      onLongPress={() => handleLongPressMessage(item)}
+      activeOpacity={0.7}
+    >
+      <StreamingText
         content={item.content}
         isStreaming={item.isStreaming || false}
         isAssistant={item.role === 'assistant'}
@@ -423,7 +515,7 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
           <Text style={styles.streamingIndicator}>Typing...</Text>
         )}
       </View>
-    </View>
+    </TouchableOpacity>
   );
 
   const renderEmptyState = () => (
@@ -501,7 +593,7 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
           for (const id of ids) {
             try {
               await actions.deleteThread(id);
-            } catch {}
+            } catch { }
           }
         }}
       />
@@ -513,6 +605,29 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
         onSelectModel={actions.setModel}
         onClose={() => setIsModelModalVisible(false)}
       />
+
+      {/* Context Menu Modal */}
+      <Modal
+        visible={contextMenu.visible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={closeContextMenu}
+      >
+        <TouchableOpacity
+          style={styles.contextMenuBackdrop}
+          activeOpacity={1}
+          onPress={closeContextMenu}
+        >
+          <View style={styles.contextMenuContainer}>
+            <TouchableOpacity
+              style={styles.contextMenuItem}
+              onPress={handleCopyMessage}
+            >
+              <Text style={styles.contextMenuItemText}>Copy Message</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </KeyboardAvoidingView>
   );
 };
@@ -782,6 +897,33 @@ const styles = StyleSheet.create({
   },
   threadSeparator: {
     height: 8,
+  },
+  contextMenuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  contextMenuContainer: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    minWidth: 200,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  contextMenuItem: {
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#E5E5EA',
+  },
+  contextMenuItemText: {
+    fontSize: 16,
+    color: '#000000',
+    textAlign: 'center',
   },
 });
 
