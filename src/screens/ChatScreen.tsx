@@ -78,9 +78,16 @@ const StreamingText = ({ content, isStreaming, style, isAssistant }: { content: 
           }
         }
         
-        // Continue animation if there's more to reveal
-        if (revealedLength < content.length) {
+        // Continue animation if there's more to reveal AND component is still mounted
+        const shouldContinue = revealedLength < content.length && (isStreaming || targetEndTime);
+        if (shouldContinue) {
           animationId = requestAnimationFrame(updateReveal);
+        } else {
+          // Animation complete - clean up
+          if (!isStreaming && revealedLength >= content.length) {
+            setTargetEndTime(null);
+            setHasStartedRevealing(false);
+          }
         }
       };
       
@@ -101,9 +108,20 @@ const StreamingText = ({ content, isStreaming, style, isAssistant }: { content: 
       setHasStartedRevealing(true);
     }
   }, [isStreaming, hasStartedRevealing]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      // Component is unmounting, ensure any running animations are stopped
+      if (hasStartedRevealing) {
+        setHasStartedRevealing(false);
+        setTargetEndTime(null);
+      }
+    };
+  }, []);
   
-  // Markdown styling for assistant messages
-  const markdownStyles = {
+  // Memoize markdown styles to prevent recreation on every render
+  const markdownStyles = React.useMemo(() => ({
     body: style,
     code_inline: {
       backgroundColor: 'rgba(0,0,0,0.1)',
@@ -128,7 +146,7 @@ const StreamingText = ({ content, isStreaming, style, isAssistant }: { content: 
     list_item: { ...style, marginVertical: 1 },
     bullet_list: { marginVertical: 4 },
     ordered_list: { marginVertical: 4 },
-  };
+  }), [style]);
 
   // If we haven't started revealing yet (before streaming begins), show full content
   if (!hasStartedRevealing) {
