@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, Alert, KeyboardAvoidingView, Platform, useWindowDimensions, Keyboard, Animated } from 'react-native';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, Alert, KeyboardAvoidingView, Platform, Keyboard } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { useHeaderHeight } from '@react-navigation/elements';
@@ -8,15 +8,9 @@ import { useApp } from '../context/AppContext';
 import { NavigationParams, Message } from '../types';
 import ChatSidebar from '../components/ChatSidebar';
 import { ModelSelectionModal, AVAILABLE_MODELS } from '../components/ModelSelectionModal.tsx';
-import Markdown from 'react-native-markdown-display';
-import MarkdownIt from 'markdown-it';
+import { StreamingMarkdownProcessor } from '../utils/StreamingMarkdownProcessor';
+import { MarkdownASTNode } from '../utils/MarkdownParser';
 
-// Create a single markdown parser instance
-const mdParser = new MarkdownIt({
-  html: false,
-  breaks: true,
-  linkify: true,
-});
 
 type ChatScreenNavigationProp = StackNavigationProp<NavigationParams, 'Chat'>;
 type ChatScreenRouteProp = RouteProp<NavigationParams, 'Chat'>;
@@ -27,96 +21,46 @@ interface Props {
 }
 
 // Helper component to render streaming text with character-by-character reveal
-const StreamingText = ({ content, isStreaming, style, isAssistant }: { content: string, isStreaming: boolean, style: any, isAssistant?: boolean }) => {
+const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: { content: string, isStreaming: boolean, style: any, isAssistant?: boolean, messageId?: string }) => {
   const [revealedLength, setRevealedLength] = useState(0);
   const [hasStartedRevealing, setHasStartedRevealing] = useState(false);
   const [targetEndTime, setTargetEndTime] = useState<number | null>(null);
   const [wasStreaming, setWasStreaming] = useState(false);
   
-  // Maintain parsed tokens for incremental rendering  
-  const [fullTokens, setFullTokens] = useState<any[]>([]);
-  const [parsedContent, setParsedContent] = useState('');
+  // Streaming markdown parser state
+  const [currentAST, setCurrentAST] = useState<MarkdownASTNode[]>([]);
+  const lastProcessedContentRef = useRef('');
   
-  // Parse content as it streams in - update tokens when content changes
+  const streamingProcessor = useMemo(() => 
+    new StreamingMarkdownProcessor((ast) => setCurrentAST(ast)),
+    []
+  );
+  
+  // Reset parser only when we have a completely new message (different message ID)
+  const lastMessageIdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (isAssistant && content) {
-      try {
-        const tokens = mdParser.parse(content, {});
-        setFullTokens(tokens);
-        setParsedContent(content);
-      } catch (error) {
-        console.warn('Failed to parse content:', error);
-        setFullTokens([]);
-      }
+    if (isAssistant && messageId && messageId !== lastMessageIdRef.current) {
+      streamingProcessor.reset();
+      setCurrentAST([]);
+      lastProcessedContentRef.current = '';
+      lastMessageIdRef.current = messageId;
     }
-  }, [content, isAssistant]);
+  }, [messageId, isAssistant]);
   
-  // Generate visible content based on revealed length but using the stable AST
-  const visibleMarkdown = React.useMemo(() => {
-    if (!isAssistant || fullTokens.length === 0) {
-      return null;
-    }
-    
-    // Extract text content from tokens up to revealed length
-    let totalLength = 0;
-    let visibleText = '';
-    
-    for (const token of fullTokens) {
+  // Process characters incrementally as they're revealed
+  useEffect(() => {
+    if (isAssistant && content && hasStartedRevealing && revealedLength > 0) {
+      // Use Unicode-aware character slicing to avoid breaking emojis
+      const contentChars = [...content]; // Convert to array of Unicode characters
+      const visibleChars = contentChars.slice(0, revealedLength);
+      const visibleContent = visibleChars.join('');
       
-      if (token.type === 'text' || token.type === 'code_inline') {
-        const tokenContent = token.content || '';
-        if (totalLength + tokenContent.length <= revealedLength) {
-          visibleText += tokenContent;
-          totalLength += tokenContent.length;
-          console.log('Added full token:', tokenContent, 'totalLength now:', totalLength);
-        } else {
-          // Partial token content
-          const remainingChars = revealedLength - totalLength;
-          if (remainingChars > 0) {
-            const partial = tokenContent.slice(0, remainingChars);
-            visibleText += partial;
-            console.log('Added partial token:', partial, 'from:', tokenContent);
-          }
-          break;
-        }
-      } else if (token.type === 'softbreak' || token.type === 'hardbreak') {
-        if (totalLength < revealedLength) {
-          visibleText += '\n';
-          totalLength += 1;
-        } else {
-          break;
-        }
-      } else if (token.children && token.children.length > 0) {
-        // Process nested tokens (like paragraph content)
-        for (const child of token.children) {
-          if (child.type === 'text' || child.type === 'code_inline') {
-            const childContent = child.content || '';
-            if (totalLength + childContent.length <= revealedLength) {
-              visibleText += childContent;
-              totalLength += childContent.length;
-            } else {
-              // Partial child content
-              const remainingChars = revealedLength - totalLength;
-              if (remainingChars > 0) {
-                const partial = childContent.slice(0, remainingChars);
-                visibleText += partial;
-              }
-              return visibleText; // Exit early when we reach the limit
-            }
-          } else if (child.type === 'softbreak' || child.type === 'hardbreak') {
-            if (totalLength < revealedLength) {
-              visibleText += '\n';
-              totalLength += 1;
-            } else {
-              return visibleText;
-            }
-          }
-        }
-      }
+      // Process the full content up to the visible length
+      const newAST = streamingProcessor.appendText(content, revealedLength);
+      setCurrentAST(newAST.children || []);
+      lastProcessedContentRef.current = visibleContent;
     }
-    
-    return visibleText;
-  }, [fullTokens, revealedLength, isAssistant]);
+  }, [revealedLength]);
   
   useEffect(() => {
     // Lock in the target end time when streaming transitions from true to false
@@ -128,8 +72,11 @@ const StreamingText = ({ content, isStreaming, style, isAssistant }: { content: 
   }, [isStreaming, wasStreaming]);
   
   useEffect(() => {
+    // Use Unicode-aware character counting
+    const contentLength = [...content].length; // Unicode character count
+    
     // Start revealing when streaming begins or continue if there's more content to reveal
-    if ((isStreaming || revealedLength < content.length) && content.length > revealedLength) {
+    if ((isStreaming || revealedLength < contentLength) && contentLength > revealedLength) {
       if (isStreaming && !hasStartedRevealing) {
         setHasStartedRevealing(true);
         setRevealedLength(0);
@@ -146,13 +93,13 @@ const StreamingText = ({ content, isStreaming, style, isAssistant }: { content: 
         if (isStreaming) {
           // During streaming: reveal 1 character every 2ms
           if (deltaTime >= 2) {
-            setRevealedLength(prev => Math.min(prev + 1, content.length));
+            setRevealedLength(prev => Math.min(prev + 1, contentLength));
             lastUpdateTime = now;
           }
         } else if (targetEndTime) {
           // After streaming: maintain or increase speed, never slow down
           const remainingTime = Math.max(1, targetEndTime - now);
-          const remainingChars = content.length - revealedLength;
+          const remainingChars = contentLength - revealedLength;
           
           if (remainingChars > 0) {
             // Only reveal if enough time has passed (maintain 3ms minimum interval)
@@ -165,19 +112,19 @@ const StreamingText = ({ content, isStreaming, style, isAssistant }: { content: 
               const streamingSpeedChars = 1;
               const charsToReveal = Math.max(streamingSpeedChars, minCharsPerFrame);
               
-              setRevealedLength(prev => Math.min(prev + charsToReveal, content.length));
+              setRevealedLength(prev => Math.min(prev + charsToReveal, contentLength));
               lastUpdateTime = now;
             }
           }
         }
         
         // Continue animation if there's more to reveal AND component is still mounted
-        const shouldContinue = revealedLength < content.length && (isStreaming || targetEndTime);
+        const shouldContinue = revealedLength < contentLength && (isStreaming || targetEndTime);
         if (shouldContinue) {
           animationId = requestAnimationFrame(updateReveal);
         } else {
           // Animation complete - clean up
-          if (!isStreaming && revealedLength >= content.length) {
+          if (!isStreaming && revealedLength >= contentLength) {
             setTargetEndTime(null);
             setHasStartedRevealing(false);
           }
@@ -213,66 +160,99 @@ const StreamingText = ({ content, isStreaming, style, isAssistant }: { content: 
     };
   }, []);
   
+  // Custom AST renderer for streaming markdown
+  const renderAST = React.useCallback((ast: MarkdownASTNode[]): React.ReactNode => {
+    return ast.map((node, index) => {
+      switch (node.type) {
+        case 'paragraph':
+          return (
+            <Text key={index} style={style}>
+              {node.children?.map((child, childIndex) => renderASTNode(child, childIndex))}
+            </Text>
+          );
+        case 'heading':
+          const headingLevel = node.metadata?.level || 1;
+          const headingStyle = [
+            style,
+            {
+              fontSize: style.fontSize * (1.5 - headingLevel * 0.1),
+              fontWeight: 'bold',
+              marginVertical: 6
+            }
+          ];
+          return (
+            <Text key={index} style={headingStyle}>
+              {node.content}
+            </Text>
+          );
+        default:
+          return renderASTNode(node, index);
+      }
+    });
+  }, [style]);
+
+  const renderASTNode = React.useCallback((node: MarkdownASTNode, key: number): React.ReactNode => {
+    const unicodeStyle = { fontFamily: Platform.OS === 'ios' ? 'System' : 'Roboto' };
+    
+    switch (node.type) {
+      case 'text':
+        return <Text key={key} style={unicodeStyle}>{node.content}</Text>;
+      case 'strong':
+        return <Text key={key} style={[unicodeStyle, { fontWeight: 'bold' }]}>{node.content}</Text>;
+      case 'emphasis':
+        return <Text key={key} style={[unicodeStyle, { fontStyle: 'italic' }]}>{node.content}</Text>;
+      case 'code_inline':
+        return (
+          <Text 
+            key={key} 
+            style={[
+              unicodeStyle,
+              { 
+                fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                backgroundColor: 'rgba(0,0,0,0.1)', 
+                paddingHorizontal: 4, 
+                borderRadius: 3 
+              }
+            ]}
+          >
+            {node.content}
+          </Text>
+        );
+      case 'link':
+        return (
+          <Text 
+            key={key} 
+            style={[
+              unicodeStyle,
+              { 
+                color: '#007AFF', 
+                textDecorationLine: 'underline' 
+              }
+            ]}
+          >
+            {node.content}
+          </Text>
+        );
+      default:
+        return <Text key={key} style={unicodeStyle}>{node.content || ''}</Text>;
+    }
+  }, []);
 
 
-  // Memoize markdown styles to prevent recreation on every render
-  const markdownStyles = React.useMemo(() => ({
-    body: style,
-    code_inline: {
-      backgroundColor: 'rgba(0,0,0,0.1)',
-      paddingHorizontal: 4,
-      paddingVertical: 2,
-      borderRadius: 3,
-      fontFamily: 'Menlo',
-      fontSize: style.fontSize * 0.9,
-    },
-    code_block: {
-      backgroundColor: 'rgba(0,0,0,0.1)',
-      padding: 8,
-      borderRadius: 6,
-      fontFamily: 'Menlo',
-      fontSize: style.fontSize * 0.9,
-    },
-    heading1: { ...style, fontSize: style.fontSize * 1.3, fontWeight: 'bold', marginVertical: 4 },
-    heading2: { ...style, fontSize: style.fontSize * 1.2, fontWeight: 'bold', marginVertical: 3 },
-    heading3: { ...style, fontSize: style.fontSize * 1.1, fontWeight: 'bold', marginVertical: 2 },
-    strong: { ...style, fontWeight: 'bold' },
-    em: { ...style, fontStyle: 'italic' },
-    list_item: { ...style, marginVertical: 1 },
-    bullet_list: { marginVertical: 4 },
-    ordered_list: { marginVertical: 4 },
-  }), [style]);
 
-  // Use incremental AST approach for assistant messages
+  // Use streaming AST renderer for assistant messages
   if (isAssistant) {
     if (!hasStartedRevealing) {
       // Before streaming starts, show full content with standard markdown
-      return <Markdown style={markdownStyles}>{content}</Markdown>;
-    } else if (revealedLength >= content.length) {
-      // Streaming complete - show full content with markdown for final formatting
-      return <Markdown style={markdownStyles}>{content}</Markdown>;
+      const initialAST = streamingProcessor.finalize(content);
+      return <>{renderAST(initialAST.children || [])}</>;
+    } else if (revealedLength >= [...content].length) {
+      // Streaming complete - finalize and show full content with standard markdown
+      const finalAST = streamingProcessor.finalize(content);
+      return <>{renderAST(finalAST.children || [])}</>;
     } else {
-      // During streaming - show markdown of the revealed portion
-      // Use the character count from AST extraction but render original markdown
-      const textLength = visibleMarkdown !== null ? visibleMarkdown.length : revealedLength;
-      
-      // Find the position in the original markdown that corresponds to our text length
-      // This preserves markdown formatting while showing progressive reveal
-      let markdownPos = 0;
-      let textPos = 0;
-      
-      // Walk through the original content to find where our visible text ends
-      while (markdownPos < content.length && textPos < textLength) {
-        const char = content[markdownPos];
-        // Skip markdown markup characters when counting visible text
-        if (char !== '*' && char !== '_' && char !== '`') {
-          textPos++;
-        }
-        markdownPos++;
-      }
-      
-      const visibleMarkdownContent = content.slice(0, markdownPos);
-      return <Markdown style={markdownStyles}>{visibleMarkdownContent}</Markdown>;
+      // During streaming - render from incremental AST
+      return <>{renderAST(currentAST)}</>;
     }
   }
 
@@ -289,7 +269,7 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   const { state, actions } = useApp();
   const headerHeight = useHeaderHeight();
   const [inputText, setInputText] = useState('');
-  const [isTyping, setIsTyping] = useState(false);
+  const [_isTyping, setIsTyping] = useState(false);
   const [isSidebarVisible, setIsSidebarVisible] = useState(false);
   const [isModelModalVisible, setIsModelModalVisible] = useState(false);
   const flatListRef = useRef<FlatList>(null);
@@ -424,6 +404,7 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
         content={item.content}
         isStreaming={item.isStreaming || false}
         isAssistant={item.role === 'assistant'}
+        messageId={item.id}
         style={[
           styles.messageText,
           item.role === 'user' ? styles.userMessageText : styles.assistantMessageText

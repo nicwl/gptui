@@ -7,7 +7,7 @@ export class StorageService {
   static async saveThreads(threads: Thread[]): Promise<void> {
     try {
       // Filter out empty threads before saving
-      const nonEmptyThreads = threads.filter(thread => !thread.isEmpty);
+      const nonEmptyThreads = threads.filter(thread => thread.messages.length > 0);
       const jsonValue = JSON.stringify(nonEmptyThreads);
       await AsyncStorage.setItem(THREADS_KEY, jsonValue);
     } catch (error) {

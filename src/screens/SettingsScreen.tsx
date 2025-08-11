@@ -203,7 +203,7 @@ const SettingsScreen: React.FC<Props> = ({ navigation }) => {
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Conversations:</Text>
           <Text style={styles.infoValue}>
-            {state.threads.filter(t => !t.isEmpty).length}
+            {state.threads.filter(t => t.messages.length > 0).length}
           </Text>
         </View>
         <View style={styles.infoRow}>

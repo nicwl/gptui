@@ -100,7 +100,7 @@ const ThreadListScreen: React.FC<Props> = ({ navigation }) => {
   );
 
   // Filter out empty threads for display
-  const visibleThreads = state.threads.filter(thread => !thread.isEmpty);
+  const visibleThreads = state.threads.filter(thread => thread.messages.length > 0);
 
   return (
     <View style={styles.container}>
