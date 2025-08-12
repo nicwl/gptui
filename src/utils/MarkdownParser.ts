@@ -1,25 +1,12 @@
 /**
- * Pushdown automaton parser for streaming markdown
- * 
- * Based on practical streaming grammar (see MarkdownGrammar.md):
- * - Token-based processing (not character-based)
- * - Pushdown automaton with stack for nested structures
- * - Incremental AST building
- * - Context-sensitive parsing with lookahead
- * 
- * Design principles:
- * - Accepts tokens from tokenizer
- * - Uses stack for nested structures (bold, italic, links, etc.)
- * - Builds AST incrementally
- * - Flush method for EOF
- * - Tracks buffered tokens
- * - No knowledge of tokenizer or rendering
+ * Pushdown automaton Markdown parser (streaming-friendly)
+ * - Block-level PDA with simple inline parser
+ * - No regex; consumes tokenizer tokens incrementally
  */
 
-import { Token, TokenType } from './MarkdownTokenizer';
+import { Token, TokenType } from './SimpleMarkdownTokenizer';
 
-// Discriminated union types for type safety
-export type MarkdownASTNode = 
+export type MarkdownASTNode =
   | { type: 'text'; content: string }
   | { type: 'document'; children: MarkdownASTNode[] }
   | { type: 'paragraph'; children: MarkdownASTNode[] }
@@ -27,10 +14,14 @@ export type MarkdownASTNode =
   | { type: 'code_block'; content: string; metadata?: { language?: string } }
   | { type: 'code_inline'; content: string }
   | { type: 'strong'; children: MarkdownASTNode[] }
+  | { type: 'strong_emphasis'; children: MarkdownASTNode[] }
   | { type: 'emphasis'; children: MarkdownASTNode[] }
-  | { type: 'link'; children: MarkdownASTNode[]; metadata: { url: string } };
+  | { type: 'strikethrough'; children: MarkdownASTNode[] }
+  | { type: 'link'; children: MarkdownASTNode[]; metadata: { url: string } }
+  | { type: 'blockquote'; children: MarkdownASTNode[] }
+  | { type: 'list_item'; children: MarkdownASTNode[]; metadata: { depth: number; ordered: boolean; number?: number } }
+  | { type: 'hr' };
 
-// Type guards for runtime type checking
 export function hasContent(node: MarkdownASTNode): node is { type: 'text' | 'code_block' | 'code_inline'; content: string } {
   return node.type === 'text' || node.type === 'code_block' || node.type === 'code_inline';
 }
@@ -39,730 +30,662 @@ export function hasChildren(node: MarkdownASTNode): node is Extract<MarkdownASTN
   return 'children' in node;
 }
 
-export function hasMetadata(node: MarkdownASTNode): node is Extract<MarkdownASTNode, { metadata: any }> {
-  return 'metadata' in node;
-}
-
-enum ParserState {
-  DOCUMENT,                   // Root document state
-  PARAGRAPH,                  // Building paragraph content
-  HEADING,                    // Building heading content
-  CODE_BLOCK,                 // Inside code block
-  CODE_FENCE_LANG,            // Reading code block language
-}
-
-interface StackFrame {
-  type: 'strong' | 'emphasis' | 'link' | 'paragraph' | 'heading' | 'code_block' | 'code_inline';
-  node: MarkdownASTNode;
-  metadata?: {
-    url?: string;             // For links - store URL when we find it
-    expecting?: 'link_url' | 'link_text' | 'url_content';  // What we're expecting next for links
-    pendingLink?: boolean;    // Whether this is a pending link that might be incomplete
-  };
-}
+enum BlockState { Document, Paragraph, Heading, CodeBlock, ListItem, Blockquote }
 
 export class MarkdownParser {
-  private state = ParserState.DOCUMENT;
-  private ast: MarkdownASTNode & { type: 'document'; children: MarkdownASTNode[] };
-  private stack: StackFrame[] = [];
-  private bufferedTokens: Token[] = [];
-  private currentLine: Token[] = [];
-  private expectingNewline = false;
-  
-  constructor() {
-    this.ast = {
-      type: 'document',
-      children: []
-    };
-  }
-  
-  /**
-   * Accept a token and update the AST
-   */
+  private ast: MarkdownASTNode & { type: 'document'; children: MarkdownASTNode[] } = { type: 'document', children: [] };
+  private blockState: BlockState = BlockState.Document;
+  private currentContainer: (MarkdownASTNode & { children?: MarkdownASTNode[] }) | null = null;
+  private currentInline: Token[] = [];
+  private lineTokens: Token[] = [];
+  private sawBlankLine = false;
+  private headingLevel = 0;
+  private codeLanguage = '';
+  private codeHeader = false;
+
   accept(token: Token): void {
-    // Add to buffered tokens
-    this.bufferedTokens.push(token);
-    
-    switch (token.type) {
-      case TokenType.ATX_HEADING:
-        this.handleHeading(token);
+    switch (this.blockState) {
+      case BlockState.CodeBlock:
+        this.acceptInCodeBlock(token);
         break;
-        
-      case TokenType.CODE_FENCE:
-        this.handleCodeFence(token);
-        break;
-        
-      case TokenType.CODE_DELIMITER:
-        this.handleCodeDelimiter(token);
-        break;
-        
-      case TokenType.BOLD_DELIMITER:
-        this.handleBoldDelimiter(token);
-        break;
-        
-      case TokenType.ITALIC_DELIMITER:
-        this.handleItalicDelimiter(token);
-        break;
-        
-      case TokenType.LINK_TEXT_OPEN:
-        this.handleLinkTextOpen(token);
-        break;
-        
-      case TokenType.LINK_TEXT_CLOSE:
-        this.handleLinkTextClose(token);
-        break;
-        
-      case TokenType.LINK_URL_OPEN:
-        this.handleLinkUrlOpen(token);
-        break;
-        
-      case TokenType.LINK_URL_CLOSE:
-        this.handleLinkUrlClose(token);
-        break;
-        
-      case TokenType.NEWLINE:
-        this.handleNewline(token);
-        break;
-        
-      case TokenType.TEXT:
-      case TokenType.CODE_CONTENT:
-        this.handleText(token);
-        break;
-        
-      case TokenType.EOF:
-        // Clean up any incomplete links at end of input
-        this.cleanupIncompleteLinks();
+      default:
+        this.acceptInFlow(token);
         break;
     }
+    if (token.type !== TokenType.NEWLINE && token.type !== TokenType.EOF) this.lineTokens.push(token);
   }
-  
-  /**
-   * Signal end of input and finalize AST
-   */
+
   flush(): void {
-    // Finalize any open paragraph
-    this.finalizeParagraph();
-    
-    // Close any remaining open formatting
-    while (this.stack.length > 0) {
-      this.popStack();
-    }
-    
-    // Consolidate adjacent text nodes to fix fragmentation
-    this.consolidateTextNodes(this.ast);
-    
-    // Clear buffered tokens since we're done
-    this.bufferedTokens = [];
+    this.accept({ type: TokenType.EOF, content: '', position: -1 });
+    this.finalizeOpenBlock();
   }
-  
-  /**
-   * Get the current AST (shallow copy for performance)
-   */
-  getAST(): MarkdownASTNode {
-    return this.ast;
-  }
-  
-  /**
-   * Get a reference to the AST (for performance-critical rendering)
-   */
-  getASTReference(): MarkdownASTNode {
-    return this.ast;
-  }
-  
-  /**
-   * Get buffered tokens that haven't been incorporated into AST yet
-   */
-  getBufferedTokens(): Token[] {
-    return [...this.bufferedTokens];
-  }
-  
-  /**
-   * Reset parser state
-   */
+
+  getAST(): MarkdownASTNode { return this.ast; }
+  getASTReference(): MarkdownASTNode { return this.ast; }
+  getBufferedTokens(): Token[] { return []; }
   reset(): void {
-    this.state = ParserState.DOCUMENT;
-    this.ast = {
-      type: 'document',
-      children: []
-    };
-    this.stack = [];
-    this.bufferedTokens = [];
-    this.currentLine = [];
-    this.expectingNewline = false;
+    this.ast = { type: 'document', children: [] };
+    this.blockState = BlockState.Document;
+    this.currentContainer = null;
+    this.currentInline = [];
+    this.lineTokens = [];
+    this.sawBlankLine = false;
+    this.headingLevel = 0;
+    this.codeLanguage = '';
+    this.codeHeader = false;
   }
-  
-  private handleHeading(token: Token): void {
-    this.finalizeParagraph();
-    
-    const headingNode: MarkdownASTNode = {
-      type: 'heading',
-      children: [],
-      metadata: { level: token.metadata?.level || 1 }
-    };
-    
-    this.ast.children.push(headingNode);
-    this.pushStack('heading', headingNode);
-    this.state = ParserState.HEADING;
-    this.consumeBufferedToken(token);
-  }
-  
-  private handleCodeFence(token: Token): void {
-    if (this.state === ParserState.CODE_BLOCK) {
-      // Closing code fence - trim leading and trailing newlines from content
-      const codeFrame = this.findStackFrame('code_block');
-      if (codeFrame && codeFrame.node.type === 'code_block') {
-        // Remove leading and trailing newlines, but preserve internal newlines
-        codeFrame.node.content = codeFrame.node.content.replace(/^\n+|\n+$/g, '');
-      }
-      this.popStack();
-      this.state = ParserState.DOCUMENT;
-    } else {
-      // Opening code fence
-      this.finalizeParagraph();
-      
-      const codeNode: MarkdownASTNode = {
-        type: 'code_block',
-        content: '',
-        metadata: { language: '' }
-      };
-      
-      this.ast.children.push(codeNode);
-      this.pushStack('code_block', codeNode);
-      this.state = ParserState.CODE_BLOCK;
-    }
-    this.consumeBufferedToken(token);
-  }
-  
-  private handleCodeDelimiter(token: Token): void {
-    const existingCode = this.findStackFrame('code_inline');
-    
-    if (existingCode) {
-      // Closing inline code
-      this.popStackUntil('code_inline');
-    } else {
-      // Opening inline code
-      this.ensureParagraph();
-      
-      const codeNode: MarkdownASTNode = {
-        type: 'code_inline',
-        content: ''
-      };
-      
-      this.getCurrentContainer().children.push(codeNode);
-      this.pushStack('code_inline', codeNode);
-    }
-    this.consumeBufferedToken(token);
-  }
-  
-  private handleBoldDelimiter(token: Token): void {
-    // Check if we're potentially inside a link - if so, don't process emphasis yet
-    const hasUnresolvedLinkStart = this.bufferedTokens.some(t => 
-      t.type === TokenType.LINK_TEXT_OPEN
+
+  private acceptInFlow(token: Token): void {
+    // Structural at line-start
+    if (token.type === TokenType.TRIPLE_BACKTICK) { this.commitDeferredStartTokens(); this.startCodeBlock(); return; }
+    if (token.type === TokenType.HASH_SEQUENCE && this.isStartOfLine()) { this.startHeading(Math.min(6, token.content.length)); return; }
+    if (token.type === TokenType.GREATER && this.isStartOfLine()) { if (this.blockState !== BlockState.Blockquote) { this.startBlockquote(); } return; }
+
+    // Defer potential list markers at the beginning of a line
+    const isPotentialListChar = (
+      token.type === TokenType.SPACE || token.type === TokenType.TAB || token.type === TokenType.DASH ||
+      token.type === TokenType.PLUS || token.type === TokenType.ASTERISK || token.type === TokenType.DIGIT_SEQUENCE ||
+      token.type === TokenType.PERIOD || (token as any).type === (TokenType as any).TRIPLE_ASTERISK
     );
-    
-    if (hasUnresolvedLinkStart) {
-      // Don't consume emphasis tokens while potential links are being resolved
-      // They will be processed by the recursive parser if the link is complete
-      return;
-    }
-    
-    const existingBold = this.findStackFrame('strong');
-    
-    if (existingBold) {
-      // Closing bold
-      this.popStackUntil('strong');
-    } else {
-      // Opening bold
-      this.ensureParagraph();
-      
-      const boldNode: MarkdownASTNode = {
-        type: 'strong',
-        children: []
-      };
-      
-      this.getCurrentContainer().children.push(boldNode);
-      this.pushStack('strong', boldNode);
-    }
-    this.consumeBufferedToken(token);
-  }
-  
-  private handleItalicDelimiter(token: Token): void {
-    // Check if we're potentially inside a link - if so, don't process emphasis yet
-    const hasUnresolvedLinkStart = this.bufferedTokens.some(t => 
-      t.type === TokenType.LINK_TEXT_OPEN
-    );
-    
-    if (hasUnresolvedLinkStart) {
-      // Don't consume emphasis tokens while potential links are being resolved
-      // They will be processed by the recursive parser if the link is complete
-      return;
-    }
-    
-    const existingItalic = this.findStackFrame('emphasis');
-    
-    if (existingItalic) {
-      // Closing italic
-      this.popStackUntil('emphasis');
-    } else {
-      // Opening italic
-      this.ensureParagraph();
-      
-      const italicNode: MarkdownASTNode = {
-        type: 'emphasis',
-        children: []
-      };
-      
-      this.getCurrentContainer().children.push(italicNode);
-      this.pushStack('emphasis', italicNode);
-    }
-    this.consumeBufferedToken(token);
-  }
-  
-  private handleLinkTextOpen(token: Token): void {
-    // Don't consume - keep in buffer for potential cleanup
-    // Explicitly do nothing to leave token in buffer
-  }
-  
-  private handleLinkTextClose(token: Token): void {
-    // Don't consume - keep in buffer for potential cleanup
-    // Explicitly do nothing to leave token in buffer
-  }
-  
-  private handleLinkUrlOpen(token: Token): void {
-    // Don't consume - keep in buffer for potential cleanup
-    // Explicitly do nothing to leave token in buffer
-  }
-  
-  private handleLinkUrlClose(token: Token): void {
-    // We have a complete link! Parse it properly with nested content
-    
-    // Find the most recent link pattern in the buffer: [text](url)
-    const bufferCopy = [...this.bufferedTokens];
-    let linkStartIndex = -1;
-    let linkTextCloseIndex = -1;
-    let linkUrlOpenIndex = -1;
-    
-    // Find the pattern: LINK_TEXT_OPEN ... LINK_TEXT_CLOSE LINK_URL_OPEN ... (current token is LINK_URL_CLOSE)
-    for (let i = bufferCopy.length - 1; i >= 0; i--) {
-      if (bufferCopy[i].type === TokenType.LINK_URL_OPEN) {
-        linkUrlOpenIndex = i;
-        // Look backwards for LINK_TEXT_CLOSE
-        for (let j = i - 1; j >= 0; j--) {
-          if (bufferCopy[j].type === TokenType.LINK_TEXT_CLOSE) {
-            linkTextCloseIndex = j;
-            // Look backwards for LINK_TEXT_OPEN
-            for (let k = j - 1; k >= 0; k--) {
-              if (bufferCopy[k].type === TokenType.LINK_TEXT_OPEN) {
-                linkStartIndex = k;
-                break;
-              }
+    if (this.isStartOfLine() || (this as any).deferredStartTokens?.length > 0) {
+      if (isPotentialListChar) {
+        // @ts-ignore
+        this.deferredStartTokens.push(token);
+        // On space, attempt to resolve into a list marker or commit as plain text
+        if (token.type === TokenType.SPACE) {
+          // Use deferred tokens gathered for this line start, plus this space
+          // @ts-ignore
+          const tokensForCheck = [...this.deferredStartTokens];
+          const marker = this.detectListMarkerFromTokens(tokensForCheck);
+          if (marker) {
+            if (this.canStartListHere()) {
+              this.startListItem(marker.depth, marker.ordered, marker.number);
+              // Clear deferred; content for the item starts after marker
+              // @ts-ignore
+              this.deferredStartTokens = [];
+              return;
             }
-            break;
+            // Not allowed to start list here; treat as text
+            this.commitDeferredStartTokens();
+            // Clear deferred; content for the item starts after marker
+            // @ts-ignore
+            this.deferredStartTokens = [];
+            return;
+          } else {
+            // Not enough info yet; keep deferring until a non-marker token arrives
+            return;
           }
         }
-        break;
+        return;
+      } else if ((this as any).deferredStartTokens?.length > 0) {
+        // Non-marker token encountered; commit deferred then proceed normally
+        this.commitDeferredStartTokens();
       }
     }
-    
-    if (linkStartIndex >= 0 && linkTextCloseIndex >= 0 && linkUrlOpenIndex >= 0) {
-      // Parse the link content properly with nested formatting
-      const linkTextTokens = bufferCopy.slice(linkStartIndex + 1, linkTextCloseIndex);
-      const linkUrlTokens = bufferCopy.slice(linkUrlOpenIndex + 1, bufferCopy.length);
-      
-      // Parse URL (simple text concatenation)
-      const linkUrl = linkUrlTokens
-        .filter(t => t.type === TokenType.TEXT)
-        .map(t => t.content)
-        .join('');
-      
-      // Parse link text with proper nested formatting
-      const linkTextChildren = this.parseInlineTokens(linkTextTokens);
-      
-      // Create the link node with proper children
-      this.ensureParagraph();
-      const linkNode: MarkdownASTNode = {
-        type: 'link',
-        children: linkTextChildren,
-        metadata: { url: linkUrl }
-      };
-      
-      this.getCurrentContainer().children.push(linkNode);
-      
-      // Remove all the consumed link tokens from the buffer
-      this.bufferedTokens.splice(linkStartIndex, bufferCopy.length - linkStartIndex);
-    }
-    
-    this.consumeBufferedToken(token);
-  }
-  
-  private handleNewline(token: Token): void {
-    if (this.state === ParserState.CODE_BLOCK) {
-      // Preserve newlines in code blocks
-      const codeFrame = this.findStackFrame('code_block');
-      if (codeFrame) {
-        if (codeFrame.node.type === 'code_block') {
-          codeFrame.node.content += '\n';
-        }
-      }
-    } else if (this.state === ParserState.HEADING) {
-      // End of heading
-      this.popStack();
-      this.state = ParserState.DOCUMENT;
-    } else if (this.state === ParserState.PARAGRAPH && this.expectingNewline) {
-      // End of paragraph (double newline)
-      this.finalizeParagraph();
-    } else if (this.state === ParserState.PARAGRAPH) {
-      // Single newline in paragraph - mark that we're expecting another
-      this.expectingNewline = true;
-    }
-    
-    // Newlines break incomplete link syntax
-    this.cleanupIncompleteLinks();
-    
-    this.currentLine = [];
-    this.consumeBufferedToken(token);
-  }
-  
-  private handleText(token: Token): void {
-    this.expectingNewline = false;
-    
-    // Handle different contexts
-    if (this.state === ParserState.CODE_BLOCK) {
-      // Add to code block content
-      const codeFrame = this.findStackFrame('code_block');
-      if (codeFrame) {
-        if (codeFrame.node.type === 'code_block') {
-          codeFrame.node.content += token.content;
-        }
-      }
-    } else {
-      // Check if there are unresolved LINK_TEXT_OPEN tokens (potential link start)
-      // but allow other processing to continue for nested formatting
-      const hasUnresolvedLinkStart = this.bufferedTokens.some(t => 
-        t.type === TokenType.LINK_TEXT_OPEN
-      );
-      
-      if (hasUnresolvedLinkStart) {
-        // We're potentially inside a link - don't consume text tokens yet
-        // but other formatting like emphasis should still be processed
-        this.currentLine.push(token);
+
+    // Spaces handling and list detection
+    if (token.type === TokenType.SPACE) {
+      if (this.blockState === BlockState.Heading && this.currentInline.length === 0) {
+        // ignore a single space right after heading marker
         return;
       }
-      
-      // Regular text content - add to AST
-      // Check if we're in inline code
-      const codeFrame = this.findStackFrame('code_inline');
-      if (codeFrame) {
-        if (codeFrame.node.type === 'code_inline') {
-          codeFrame.node.content += token.content;
+      if (!this.isStartOfLine()) {
+        const marker = this.extractListMarkerWithPendingSpace(token);
+        if (marker) {
+          if (this.canStartListHere()) {
+            this.startListItem(marker.depth, marker.ordered, marker.number);
+            // @ts-ignore
+            this.deferredStartTokens = [];
+            return;
+          } else {
+            this.commitDeferredStartTokens();
+          }
         }
+        // Not a marker: commit deferred and continue
+        this.commitDeferredStartTokens();
       } else {
-        // Regular text - add to current context (heading or paragraph)
-        if (this.state === ParserState.HEADING || this.state === ParserState.PARAGRAPH) {
-          // Don't create a new paragraph if we're already in heading/paragraph context
-          if (this.state !== ParserState.HEADING) {
-            this.ensureParagraph();
-          }
-        } else {
-          this.ensureParagraph();
+        // leading indentation or potential marker: defer
+        this.deferredStartTokens.push(token);
+        return;
+      }
+    }
+
+    // At true start of a new line, defer emitting potential list-marker components
+    if (this.isStartOfLine()) {
+      if (
+        token.type === TokenType.TAB || token.type === TokenType.DASH || token.type === TokenType.PLUS ||
+        token.type === TokenType.ASTERISK || token.type === TokenType.DIGIT_SEQUENCE || token.type === TokenType.PERIOD ||
+        (token as any).type === (TokenType as any).TRIPLE_ASTERISK
+      ) {
+        // Defer line-start structural candidates (including potential hr sequences)
+        this.deferredStartTokens.push(token);
+        return;
+      }
+    } else if (this.deferredStartTokens.length > 0) {
+      if (token.type === TokenType.SPACE) {
+        // handled above in SPACE handling for list marker detection
+      } else if (token.type === TokenType.NEWLINE || token.type === TokenType.EOF) {
+        // Leave deferred tokens untouched; newline/EOF handlers will decide (e.g., hr detection)
+      } else {
+        // If deferred tokens look like a potential hr sequence and current token continues it, keep deferring
+        if (this.isAllHrChars(this.deferredStartTokens) && (token.type === TokenType.DASH || token.type === TokenType.ASTERISK || (token as any).type === (TokenType as any).TRIPLE_ASTERISK)) {
+          this.deferredStartTokens.push(token);
+          return;
         }
-        
-        // Add text node to current container
-        const textNode: MarkdownASTNode = {
-          type: 'text',
-          content: token.content
-        };
-        
-        this.getCurrentContainer().children.push(textNode);
+        // Not a list marker or hr sequence, commit deferred
+        this.commitDeferredStartTokens();
       }
     }
-    
-    this.currentLine.push(token);
-    this.consumeBufferedToken(token);
-  }
-  
-  private ensureParagraph(): void {
-    if (this.state !== ParserState.PARAGRAPH) {
-      const paragraphNode: MarkdownASTNode = {
-        type: 'paragraph',
-        children: []
-      };
-      
-      this.ast.children.push(paragraphNode);
-      this.pushStack('paragraph', paragraphNode);
-      this.state = ParserState.PARAGRAPH;
+
+    // Before switching on token, if at line start and we have only hr chars in deferred, keep deferring
+    if (this.isStartOfLine() && this.deferredStartTokens.length > 0 && this.isAllHrChars(this.deferredStartTokens)) {
+      // For hr lines, we don't want to create a paragraph or commit text; we wait for newline to detect and emit hr
+      return;
     }
-  }
-  
-  private finalizeParagraph(): void {
-    if (this.state === ParserState.PARAGRAPH) {
-      this.popStackUntil('paragraph');
-      this.state = ParserState.DOCUMENT;
+    switch (token.type) {
+      case TokenType.NEWLINE:
+        this.handleNewlineInFlow();
+        break;
+      case TokenType.SPACE:
+        // Should have been handled above
+        // For safety, treat as normal whitespace
+        this.ensureBlock();
+        this.currentInline.push(token);
+        this.sawBlankLine = false;
+        this.updateCurrentInlineChildren();
+        break;
+      case TokenType.EOF:
+        this.handleEOFInFlow();
+        break;
+      default:
+        this.ensureBlock();
+        this.currentInline.push(token);
+        this.sawBlankLine = false;
+        this.updateCurrentInlineChildren();
+        break;
     }
-    this.expectingNewline = false;
-  }
-  
-  private getCurrentContainer(): MarkdownASTNode & { children: MarkdownASTNode[] } {
-    if (this.stack.length > 0) {
-      const topFrame = this.stack[this.stack.length - 1];
-      // Only return stack nodes that have children (containers)
-      if (this.isContainerFrame(topFrame)) {
-        return topFrame.node;
-      }
-      // If the top frame is a content node (code_block, code_inline), 
-      // look for the nearest container frame
-      for (let i = this.stack.length - 2; i >= 0; i--) {
-        const frame = this.stack[i];
-        if (this.isContainerFrame(frame)) {
-          return frame.node;
-        }
-      }
-    }
-    // Default to document root (which always has children)
-    return this.ast;
   }
 
-  private isContainerFrame(frame: StackFrame): frame is StackFrame & { node: MarkdownASTNode & { children: MarkdownASTNode[] } } {
-    return frame.type === 'strong' || frame.type === 'emphasis' || 
-           frame.type === 'link' || frame.type === 'paragraph' || 
-           frame.type === 'heading';
-  }
-  
-  private pushStack(type: StackFrame['type'], node: MarkdownASTNode, metadata?: StackFrame['metadata']): void {
-    this.stack.push({ type, node, metadata });
-  }
-  
-  private popStack(): void {
-    this.stack.pop();
-  }
-  
-  private popStackUntil(targetType: StackFrame['type']): void {
-    while (this.stack.length > 0 && this.stack[this.stack.length - 1].type !== targetType) {
-      this.stack.pop();
-    }
-    if (this.stack.length > 0 && this.stack[this.stack.length - 1].type === targetType) {
-      this.stack.pop();
-    }
-  }
-  
-  private findStackFrame(type: StackFrame['type']): StackFrame | undefined {
-    for (let i = this.stack.length - 1; i >= 0; i--) {
-      if (this.stack[i].type === type) {
-        return this.stack[i];
+  private acceptInCodeBlock(token: Token): void {
+    if (token.type === TokenType.TRIPLE_BACKTICK) {
+      const codeNode = this.ast.children[this.ast.children.length - 1];
+      if (codeNode && codeNode.type === 'code_block' && codeNode.content.endsWith('\n')) {
+        codeNode.content = codeNode.content.slice(0, -1);
       }
+      this.blockState = BlockState.Document;
+      this.currentContainer = null;
+      this.codeLanguage = '';
+      this.codeHeader = false;
+      return;
     }
-    return undefined;
-  }
-  
-    private consumeBufferedToken(token: Token): void {
-    // Remove the token from buffered tokens since it has been processed into the AST
-    const index = this.bufferedTokens.findIndex(t =>
-      t.type === token.type && t.content === token.content
-    );
-    if (index !== -1) {
-      this.bufferedTokens.splice(index, 1);
-    }
-  }
-  
-  private consumeLinkTokensFromBuffer(): void {
-    // Consume all link-related tokens from the buffer when a complete link is confirmed
-    const linkTokenTypes = [TokenType.LINK_TEXT_OPEN, TokenType.LINK_TEXT_CLOSE, TokenType.LINK_URL_OPEN, TokenType.LINK_URL_CLOSE];
-    
-    this.bufferedTokens = this.bufferedTokens.filter(token => 
-      !linkTokenTypes.includes(token.type)
-    );
-    
-    // Also consume any TEXT tokens that were part of the link
-    // (This is approximated - in a real implementation we'd track which specific tokens belong to the link)
-  }
-
-  private cleanupIncompleteLinks(): void {
-    // Process buffered tokens as regular text since any incomplete links should become text
-    for (const token of this.bufferedTokens) {
-      if (token.type === TokenType.TEXT || 
-          token.type === TokenType.LINK_TEXT_OPEN || 
-          token.type === TokenType.LINK_TEXT_CLOSE ||
-          token.type === TokenType.LINK_URL_OPEN ||
-          token.type === TokenType.LINK_URL_CLOSE) {
-        
-        this.ensureParagraph();
-        const container = this.getCurrentContainer();
-        
-        // Check if we can append to the last text node to avoid fragmentation
-        const children = container.children || [];
-        const lastChild = children[children.length - 1];
-        if (lastChild && lastChild.type === 'text') {
-          lastChild.content += token.content;
-        } else {
-          const textNode: MarkdownASTNode = {
-            type: 'text',
-            content: token.content
-          };
-          if (container.children) {
-            container.children.push(textNode);
-          }
+    const codeNode = this.ast.children[this.ast.children.length - 1];
+    if (!codeNode || codeNode.type !== 'code_block') return;
+    // Handle optional language header line
+    if (this.codeHeader) {
+      if (token.type === TokenType.NEWLINE) {
+        const lang = this.codeLanguage.trim();
+        if (lang.length > 0) {
+          // attach language metadata only when non-empty
+          (codeNode as any).metadata = { ...(codeNode as any).metadata, language: lang };
         }
+        this.codeHeader = false;
+      } else {
+        this.codeLanguage += token.content;
       }
+      return;
     }
-    
-    // Clear all buffered tokens since we've processed them
-    this.bufferedTokens = [];
-  }
-  
-  private extractTextFromNode(node: MarkdownASTNode): string {
-    if (node.type === 'text') {
-      return node.content;
-    } else if (node.type !== 'code_block' && node.type !== 'code_inline') {
-      return node.children.map(child => this.extractTextFromNode(child)).join('');
-    }
-    return '';
+    codeNode.content += token.type === TokenType.NEWLINE ? '\n' : token.content;
   }
 
-  /**
-   * Parse a sequence of tokens into inline AST nodes
-   * This is a proper recursive descent parser for inline elements
-   */
-  private parseInlineTokens(tokens: Token[]): MarkdownASTNode[] {
-    const result: MarkdownASTNode[] = [];
+  private startCodeBlock(): void {
+    this.finalizeOpenBlock();
+    const node: MarkdownASTNode = { type: 'code_block', content: '' } as any;
+    this.ast.children.push(node);
+    this.blockState = BlockState.CodeBlock;
+    this.codeLanguage = '';
+    this.codeHeader = true;
+  }
+
+  private startHeading(level: number): void {
+    this.finalizeOpenBlock();
+    const node: MarkdownASTNode = { type: 'heading', children: [], metadata: { level } };
+    this.ast.children.push(node);
+    this.currentContainer = node;
+    this.blockState = BlockState.Heading;
+    this.headingLevel = level;
+    // Reset line tokens to capture heading text cleanly, but ignore a single leading space
+    this.lineTokens = [];
+    // Ensure we drop a single literal SPACE if it immediately follows the marker
+    // by recording that the first SPACE should be ignored. We'll treat the first
+    // SPACE token after heading start as a no-op in acceptInFlow.
+  }
+
+  private startParagraph(): void {
+    const node: MarkdownASTNode = { type: 'paragraph', children: [] };
+    this.ast.children.push(node);
+    this.currentContainer = node;
+    this.blockState = BlockState.Paragraph;
+  }
+
+  private startBlockquote(): void {
+    // If previous blockquote exists and last token was newline (continuation), keep appending
+    const last = this.ast.children[this.ast.children.length - 1];
+    if (last && last.type === 'blockquote' && this.blockState !== BlockState.Blockquote) {
+      this.currentContainer = last;
+      this.blockState = BlockState.Blockquote;
+      return;
+    }
+    this.finalizeOpenBlock();
+    const node: MarkdownASTNode = { type: 'blockquote', children: [] };
+    this.ast.children.push(node);
+    this.currentContainer = node;
+    this.blockState = BlockState.Blockquote;
+  }
+
+  private startListItem(depth: number, ordered: boolean, number?: number): void {
+    this.finalizeOpenBlock();
+    const node: MarkdownASTNode = { type: 'list_item', children: [], metadata: { depth, ordered, number } };
+    this.ast.children.push(node);
+    this.currentContainer = node;
+    this.blockState = BlockState.ListItem;
+    // When starting a list item, drop the marker tokens from current line buffer
+    this.currentInline = [];
+    // Reset line context so subsequent content is treated as list item text
+    this.lineTokens = [];
+  }
+
+  private ensureBlock(): void {
+    if (this.blockState === BlockState.Document) this.startParagraph();
+  }
+
+  private handleNewlineInFlow(): void {
+    // Horizontal rule detection for the just-finished line MUST happen before committing deferred tokens
+    const hrCandidateTokens = this.deferredStartTokens.length > 0 ? [...this.lineTokens, ...this.deferredStartTokens] : this.lineTokens;
+    if (this.isHrLine(hrCandidateTokens)) {
+      // If we're in the middle of a block, end it first
+      if (this.blockState === BlockState.Paragraph || this.blockState === BlockState.Heading || this.blockState === BlockState.ListItem || this.blockState === BlockState.Blockquote) {
+        // Remove any trailing HR-like tokens that may have been appended to inline buffer
+        this.stripTrailingHrFromCurrentInline();
+        this.flushInline();
+        this.blockState = BlockState.Document;
+        this.currentContainer = null;
+      }
+      // If previous AST node is a paragraph that contains only HR characters, remove it
+      this.removeTrailingHrOnlyParagraph();
+      (this.ast.children as any).push({ type: 'hr' } as MarkdownASTNode);
+      this.lineTokens = [];
+      this.sawBlankLine = false;
+      // Clear any deferred tokens representing the hr line; do NOT commit them as text
+      this.deferredStartTokens = [];
+      return;
+    }
+    // No hr: now commit deferred tokens if any
+    if (this.deferredStartTokens && (this.deferredStartTokens as any).length > 0) { this.commitDeferredStartTokens(); }
+    if (this.blockState === BlockState.Heading) {
+      // Headings end at newline
+      this.flushInline();
+      this.blockState = BlockState.Document;
+      this.currentContainer = null;
+      this.sawBlankLine = false;
+      this.lineTokens = [];
+      // @ts-ignore
+      if (this.deferredStartTokens) this.deferredStartTokens = [] as any;
+      return;
+    }
+    if (this.blockState === BlockState.ListItem) {
+      // End current list item line; next marker will start a new item
+      this.flushInline();
+      this.blockState = BlockState.Document;
+      this.currentContainer = null;
+      this.sawBlankLine = false;
+      this.lineTokens = [];
+      // @ts-ignore
+      if (this.deferredStartTokens) this.deferredStartTokens = [] as any;
+      return;
+    }
+    if (this.blockState === BlockState.Blockquote) {
+      // Continue blockquote across single newline; end on blank line
+      if (this.sawBlankLine) {
+        this.flushInline();
+        this.blockState = BlockState.Document;
+        this.currentContainer = null;
+        this.sawBlankLine = false;
+      } else {
+        // newline within blockquote should be treated as a space between lines
+        this.currentInline.push({ type: TokenType.SPACE, content: ' ', position: -1 });
+        this.sawBlankLine = true;
+      }
+      this.lineTokens = [];
+      // @ts-ignore
+      if (this.deferredStartTokens) this.deferredStartTokens = [] as any;
+      return;
+    }
+    if (this.blockState === BlockState.Paragraph) {
+      // Soft break on single newline, new paragraph on blank line
+      if (this.sawBlankLine) {
+        // End paragraph after blank line
+        this.flushInline();
+        this.blockState = BlockState.Document;
+        this.currentContainer = null;
+        this.sawBlankLine = false;
+      } else {
+        // Insert soft break as a space and keep accumulating tokens
+        // Only add a space if last token isn't already space
+        const last = this.currentInline[this.currentInline.length - 1];
+        if (!(last && last.type === TokenType.SPACE)) {
+          this.currentInline.push({ type: TokenType.SPACE, content: ' ', position: -1 });
+        }
+        this.updateCurrentInlineChildren();
+        this.sawBlankLine = true;
+      }
+      this.lineTokens = [];
+      // @ts-ignore
+      if (this.deferredStartTokens) this.deferredStartTokens = [] as any;
+      return;
+    }
+    // Outside any block: track blank lines for upcoming blocks
+    this.sawBlankLine = true;
+    this.lineTokens = [];
+    // @ts-ignore
+    if (this.deferredStartTokens) this.deferredStartTokens = [] as any;
+  }
+
+  private isHrLine(tokens: Token[]): boolean {
+    if (!tokens || tokens.length === 0) return false;
+    let dashes = 0; let stars = 0; let triple = false;
+    for (const t of tokens) {
+      if (t.type === TokenType.SPACE || t.type === TokenType.TAB) continue;
+      if (t.type === TokenType.DASH) { dashes++; continue; }
+      if (t.type === TokenType.ASTERISK) { stars++; continue; }
+      if ((t as any).type === (TokenType as any).TRIPLE_ASTERISK) { triple = true; continue; }
+      return false;
+    }
+    return dashes >= 3 || stars >= 3 || triple;
+  }
+
+  private isAllHrChars(tokens: Token[]): boolean {
+    if (!tokens || tokens.length === 0) return false;
+    for (const t of tokens) {
+      if (t.type === TokenType.SPACE || t.type === TokenType.TAB) continue;
+      if (t.type === TokenType.DASH) continue;
+      if (t.type === TokenType.ASTERISK) continue;
+      if ((t as any).type === (TokenType as any).TRIPLE_ASTERISK) continue;
+      return false;
+    }
+    return true;
+  }
+
+  private handleEOFInFlow(): void {
+    // If the current (last) line represents an HR, emit it before finalizing
+    const hrCandidateTokens = this.deferredStartTokens.length > 0 ? [...this.lineTokens, ...this.deferredStartTokens] : this.lineTokens;
+    if (this.isHrLine(hrCandidateTokens)) {
+      if (this.blockState === BlockState.Paragraph || this.blockState === BlockState.Heading || this.blockState === BlockState.ListItem || this.blockState === BlockState.Blockquote) {
+        // Remove any trailing HR-like tokens that may have been appended to inline buffer
+        this.stripTrailingHrFromCurrentInline();
+        this.flushInline();
+      }
+      // If previous AST node is a paragraph that contains only HR characters, remove it
+      this.removeTrailingHrOnlyParagraph();
+      (this.ast.children as any).push({ type: 'hr' } as MarkdownASTNode);
+      this.blockState = BlockState.Document;
+      this.currentContainer = null;
+      this.lineTokens = [];
+      // @ts-ignore
+      if (this.deferredStartTokens) this.deferredStartTokens = [] as any;
+      return;
+    }
+    if (this.deferredStartTokens && (this.deferredStartTokens as any).length > 0) { this.commitDeferredStartTokens(); }
+    this.flushInline();
+    this.blockState = BlockState.Document;
+    this.currentContainer = null;
+    this.lineTokens = [];
+    // @ts-ignore
+    if (this.deferredStartTokens) this.deferredStartTokens = [] as any;
+  }
+
+  private finalizeOpenBlock(): void {
+    if (this.blockState === BlockState.Paragraph || this.blockState === BlockState.Heading || this.blockState === BlockState.ListItem) {
+      this.flushInline();
+      this.blockState = BlockState.Document;
+      this.currentContainer = null;
+      this.sawBlankLine = false;
+      this.lineTokens = [];
+    }
+  }
+
+  private canStartListHere(): boolean {
+    // Lists can start at the top-level document or right after headings or blank lines
+    // Disallow starting a list in the middle of an inline paragraph by requiring current block to be Document or just finalized
+    return this.blockState === BlockState.Document || this.sawBlankLine || this.blockState === BlockState.Heading;
+  }
+
+  private flushInline(): void {
+    if (!this.currentContainer || !('children' in this.currentContainer)) { this.currentInline = []; return; }
+    // Commit inline content into the container only if we have uncommitted tokens
+    if (this.currentInline.length > 0) {
+      (this.currentContainer as any).children = this.parseInline(this.currentInline);
+      this.currentInline = [];
+    }
+  }
+
+  private updateCurrentInlineChildren(): void {
+    if (!this.currentContainer || !('children' in this.currentContainer)) return;
+    (this.currentContainer as any).children = this.parseInline(this.currentInline);
+  }
+  // Deferred potential list marker tokens at the start of line
+  private deferredStartTokens: Token[] = [];
+  private commitDeferredStartTokens(): void {
+    if (!this.deferredStartTokens || this.deferredStartTokens.length === 0) return;
+    this.ensureBlock();
+    for (const t of this.deferredStartTokens) {
+      this.currentInline.push(t);
+    }
+    this.deferredStartTokens = [];
+    this.updateCurrentInlineChildren();
+  }
+
+  private parseInline(tokens: Token[]): MarkdownASTNode[] {
+    const out: MarkdownASTNode[] = [];
     let i = 0;
-    
     while (i < tokens.length) {
-      const token = tokens[i];
-      
-      switch (token.type) {
-        case TokenType.BOLD_DELIMITER:
-          const boldResult = this.parseEmphasis(tokens, i, 'strong', TokenType.BOLD_DELIMITER);
-          if (boldResult) {
-            result.push(boldResult.node);
-            i = boldResult.nextIndex;
-          } else {
-            // Treat as text if no matching delimiter
-            result.push({ type: 'text', content: token.content });
-            i++;
-          }
-          break;
-          
-        case TokenType.ITALIC_DELIMITER:
-          const italicResult = this.parseEmphasis(tokens, i, 'emphasis', TokenType.ITALIC_DELIMITER);
-          if (italicResult) {
-            result.push(italicResult.node);
-            i = italicResult.nextIndex;
-          } else {
-            // Treat as text if no matching delimiter
-            result.push({ type: 'text', content: token.content });
-            i++;
-          }
-          break;
-          
-        case TokenType.CODE_DELIMITER:
-          const codeResult = this.parseInlineCode(tokens, i);
-          if (codeResult) {
-            result.push(codeResult.node);
-            i = codeResult.nextIndex;
-          } else {
-            // Treat as text if no matching delimiter
-            result.push({ type: 'text', content: token.content });
-            i++;
-          }
-          break;
-          
-        case TokenType.TEXT:
-          // Accumulate consecutive text tokens
-          let textContent = token.content;
-          let j = i + 1;
-          while (j < tokens.length && tokens[j].type === TokenType.TEXT) {
-            textContent += tokens[j].content;
-            j++;
-          }
-          result.push({ type: 'text', content: textContent });
-          i = j;
-          break;
-          
-        default:
-          // Handle other tokens as text (like unmatched delimiters)
-          result.push({ type: 'text', content: token.content });
-          i++;
-          break;
+      const t = tokens[i];
+      // Strong (**...**) via dedicated token
+      if (t.type === TokenType.DOUBLE_ASTERISK) {
+        const j = this.findNext(tokens, i + 1, TokenType.DOUBLE_ASTERISK);
+        if (j !== -1) { out.push({ type: 'strong', children: this.parseInline(tokens.slice(i + 1, j)) }); i = j + 1; continue; }
+        // If no closing yet, treat as text for now
       }
+      // Strong via double underscore (__...__)
+      if ((t as any).type === (TokenType as any).DOUBLE_UNDERSCORE) {
+        const j = this.findNext(tokens, i + 1, (TokenType as any).DOUBLE_UNDERSCORE);
+        if (j !== -1) { out.push({ type: 'strong', children: this.parseInline(tokens.slice(i + 1, j)) }); i = j + 1; continue; }
+      }
+      // Strong emphasis (***...***)
+      if ((t as any).type === (TokenType as any).TRIPLE_ASTERISK) {
+        const j = this.findNext(tokens, i + 1, (TokenType as any).TRIPLE_ASTERISK);
+        if (j !== -1) { out.push({ type: 'strong_emphasis', children: this.parseInline(tokens.slice(i + 1, j)) }); i = j + 1; continue; }
+      }
+      // Strong emphasis (___...___)
+      if ((t as any).type === (TokenType as any).TRIPLE_UNDERSCORE) {
+        const j = this.findNext(tokens, i + 1, (TokenType as any).TRIPLE_UNDERSCORE);
+        if (j !== -1) { out.push({ type: 'strong_emphasis', children: this.parseInline(tokens.slice(i + 1, j)) }); i = j + 1; continue; }
+      }
+      // Fallback: two consecutive ASTERISK tokens behave like DOUBLE_ASTERISK
+      if (t.type === TokenType.ASTERISK && i + 1 < tokens.length && tokens[i + 1].type === TokenType.ASTERISK) {
+        // Look ahead for matching pair of consecutive asterisks
+        let j = i + 2;
+        while (j < tokens.length) {
+          if (tokens[j].type === TokenType.ASTERISK && j + 1 < tokens.length && tokens[j + 1].type === TokenType.ASTERISK) {
+            out.push({ type: 'strong', children: this.parseInline(tokens.slice(i + 2, j)) });
+            i = j + 2;
+            continue;
+          }
+          j++;
+        }
+      }
+      // Emphasis (*...*) - only if not immediately a second asterisk (handled by double)
+      if (t.type === TokenType.ASTERISK && !(i + 1 < tokens.length && tokens[i + 1].type === TokenType.ASTERISK)) {
+        const j = this.findNext(tokens, i + 1, TokenType.ASTERISK);
+        if (j !== -1) { out.push({ type: 'emphasis', children: this.parseInline(tokens.slice(i + 1, j)) }); i = j + 1; continue; }
+      }
+      // Emphasis via underscore (_..._) - not immediately a second underscore
+      if ((t as any).type === (TokenType as any).UNDERSCORE && !(i + 1 < tokens.length && (tokens[i + 1] as any).type === (TokenType as any).UNDERSCORE)) {
+        const j = this.findNext(tokens, i + 1, (TokenType as any).UNDERSCORE);
+        if (j !== -1) { out.push({ type: 'emphasis', children: this.parseInline(tokens.slice(i + 1, j)) }); i = j + 1; continue; }
+      }
+      // Strikethrough (~~...~~)
+      if ((t as any).type === (TokenType as any).DOUBLE_TILDE) {
+        const j = this.findNext(tokens, i + 1, (TokenType as any).DOUBLE_TILDE);
+        if (j !== -1) { out.push({ type: 'strikethrough', children: this.parseInline(tokens.slice(i + 1, j)) }); i = j + 1; continue; }
+      }
+      if (t.type === TokenType.BACKTICK) {
+        const j = this.findNext(tokens, i + 1, TokenType.BACKTICK);
+        if (j !== -1) { out.push({ type: 'code_inline', content: tokens.slice(i + 1, j).map(x => x.content).join('') }); i = j + 1; continue; }
+      }
+      if (t.type === TokenType.BRACKET_OPEN) {
+        const link = this.tryParseLink(tokens, i);
+        if (link) { out.push(link.node); i = link.nextIndex; continue; }
+      }
+      if (t.type === TokenType.GREATER) {
+        // Ignore raw '>' in inline pass; block layer already consumed it
+        i++;
+        continue;
+      }
+      // text aggregation
+      let text = t.content; let k = i + 1;
+      while (k < tokens.length) {
+        const nt = tokens[k];
+        // Continue aggregating plain text until we hit a potential structure start
+        if (nt.type === TokenType.TEXT || nt.type === TokenType.SPACE || nt.type === TokenType.TAB || nt.type === TokenType.NEWLINE || nt.type === TokenType.DIGIT_SEQUENCE || nt.type === TokenType.PERIOD) { text += nt.content; k++; continue; }
+        // Also aggregate unmatched literal punctuation
+        if (!(nt.type === TokenType.ASTERISK || (nt as any).type === (TokenType as any).UNDERSCORE || nt.type === TokenType.DOUBLE_ASTERISK || (nt as any).type === (TokenType as any).DOUBLE_UNDERSCORE || (nt as any).type === (TokenType as any).DOUBLE_TILDE || nt.type === TokenType.BACKTICK || nt.type === TokenType.BRACKET_OPEN)) { text += nt.content; k++; continue; }
+        break;
+      }
+      if (text !== '') out.push({ type: 'text', content: text });
+      i = k;
     }
-    
-    return result;
+    return this.mergeAdjacentTextNodes(out);
   }
-  
-  private parseEmphasis(tokens: Token[], startIndex: number, nodeType: 'strong' | 'emphasis', delimiterType: TokenType): { node: MarkdownASTNode; nextIndex: number } | null {
-    // Look for the closing delimiter
-    for (let i = startIndex + 1; i < tokens.length; i++) {
-      if (tokens[i].type === delimiterType) {
-        // Found matching delimiter - parse the content between them
-        const innerTokens = tokens.slice(startIndex + 1, i);
-        const children = this.parseInlineTokens(innerTokens);
-        
-        return {
-          node: {
-            type: nodeType,
-            children
-          },
-          nextIndex: i + 1
-        };
+
+  private mergeAdjacentTextNodes(nodes: MarkdownASTNode[]): MarkdownASTNode[] {
+    if (nodes.length === 0) return nodes;
+    const merged: MarkdownASTNode[] = [];
+    for (const node of nodes) {
+      const last = merged[merged.length - 1];
+      if (last && last.type === 'text' && node.type === 'text') {
+        last.content += node.content;
+      } else {
+        merged.push(node);
       }
     }
-    
-    // No matching delimiter found
-    return null;
+    return merged;
   }
-  
-  private parseInlineCode(tokens: Token[], startIndex: number): { node: MarkdownASTNode; nextIndex: number } | null {
-    // Look for the closing backtick
-    for (let i = startIndex + 1; i < tokens.length; i++) {
-      if (tokens[i].type === TokenType.CODE_DELIMITER) {
-        // Found matching delimiter - collect text content
-        const innerTokens = tokens.slice(startIndex + 1, i);
-        const content = innerTokens
-          .filter(t => t.type === TokenType.TEXT)
-          .map(t => t.content)
-          .join('');
-        
-        return {
-          node: {
-            type: 'code_inline',
-            content
-          },
-          nextIndex: i + 1
-        };
+
+  // Remove trailing hr-like characters from the current inline token buffer
+  private stripTrailingHrFromCurrentInline(): void {
+    if (this.currentInline.length === 0) return;
+    // Walk back while tokens are DASH or ASTERISK (or TRIPLE_ASTERISK token) or SPACE/TAB
+    let i = this.currentInline.length - 1;
+    while (i >= 0) {
+      const t = this.currentInline[i];
+      if (
+        t.type === TokenType.SPACE ||
+        t.type === TokenType.TAB ||
+        t.type === TokenType.DASH ||
+        t.type === TokenType.ASTERISK ||
+        (t as any).type === (TokenType as any).TRIPLE_ASTERISK
+      ) {
+        i--;
+        continue;
       }
+      break;
     }
-    
-    // No matching delimiter found
+    // If we removed anything, slice the array to i+1
+    if (i < this.currentInline.length - 1) {
+      this.currentInline = this.currentInline.slice(0, i + 1);
+    }
+  }
+
+  // Remove a trailing paragraph node that only contains hr-like text (e.g., '***' or '---')
+  private removeTrailingHrOnlyParagraph(): void {
+    const last = this.ast.children[this.ast.children.length - 1];
+    if (!last || last.type !== 'paragraph') return;
+    const children = (last as any).children as MarkdownASTNode[] | undefined;
+    if (!children || children.length !== 1 || children[0].type !== 'text') return;
+    const text = (children[0] as any).content as string;
+    const trimmed = text.trim();
+    if (/^(?:\*{3,}|-{3,})$/.test(trimmed)) {
+      this.ast.children.pop();
+    }
+  }
+
+  private tryParseLink(tokens: Token[], start: number): { node: MarkdownASTNode; nextIndex: number } | null {
+    let rb = -1; // find matching ] while allowing nested inline inside text
+    for (let i = start + 1; i < tokens.length; i++) {
+      if (tokens[i].type === TokenType.BRACKET_CLOSE) { rb = i; break; }
+    }
+    if (rb === -1) return null;
+    if (rb + 1 >= tokens.length || tokens[rb + 1].type !== TokenType.PAREN_OPEN) return null;
+    let rp = -1;
+    for (let i = rb + 2; i < tokens.length; i++) if (tokens[i].type === TokenType.PAREN_CLOSE) { rp = i; break; }
+    if (rp === -1) return null;
+    const textTokens = tokens.slice(start + 1, rb);
+    const url = tokens.slice(rb + 2, rp).map(t => t.content).join('');
+    const children = this.parseInline(textTokens);
+    return { node: { type: 'link', children, metadata: { url } }, nextIndex: rp + 1 };
+  }
+
+  private findNext(tokens: Token[], from: number, type: TokenType): number {
+    for (let i = from; i < tokens.length; i++) if (tokens[i].type === type) return i;
+    return -1;
+  }
+
+  private isStartOfLine(): boolean { return this.lineTokens.length === 0; }
+
+  private extractListMarkerWithPendingSpace(spaceToken: Token): { depth: number; ordered: boolean; number?: number } | null {
+    // Consider the current line tokens plus this incoming space
+    const tokens = [...this.lineTokens, spaceToken];
+    let indent = 0;
+    let idx = 0;
+    while (idx < tokens.length && (tokens[idx].type === TokenType.SPACE || tokens[idx].type === TokenType.TAB)) {
+      indent += tokens[idx].type === TokenType.TAB ? 4 : 1;
+      idx++;
+    }
+    if (idx >= tokens.length) return null;
+    const depth = 1 + Math.floor(indent / 2);
+    const t = tokens[idx];
+    if ((t.type === TokenType.DASH || t.type === TokenType.PLUS || t.type === TokenType.ASTERISK) && idx + 1 < tokens.length && tokens[idx + 1].type === TokenType.SPACE) return { depth: Math.max(1, depth), ordered: false };
+    if (t.type === TokenType.DIGIT_SEQUENCE && idx + 2 < tokens.length && tokens[idx + 1].type === TokenType.PERIOD && tokens[idx + 2].type === TokenType.SPACE) {
+      const n = parseInt(t.content, 10); return { depth: Math.max(1, depth), ordered: true, number: isNaN(n) ? undefined : n };
+    }
     return null;
   }
 
-  private consolidateTextNodes(node: MarkdownASTNode): void {
-    // Recursively consolidate text nodes in children
-    if (node.type !== 'text' && node.type !== 'code_block' && node.type !== 'code_inline') {
-      const children = node.children;
-      const consolidated: MarkdownASTNode[] = [];
-      
-      for (let i = 0; i < children.length; i++) {
-        const child = children[i];
-        
-        // Recursively consolidate this child first
-        this.consolidateTextNodes(child);
-        
-        // Check if we can merge with the previous node
-        const lastConsolidated = consolidated[consolidated.length - 1];
-        if (lastConsolidated && 
-            lastConsolidated.type === 'text' && 
-            child.type === 'text') {
-          // Merge the text content
-          lastConsolidated.content += child.content;
-        } else {
-          // Add as new node
-          consolidated.push(child);
-        }
-      }
-      
-      // Update the children array
-      node.children = consolidated;
+  private extractListMarkerFromLine(): { depth: number; ordered: boolean; number?: number } | null {
+    const tokens = this.lineTokens; let indent = 0; let idx = 0;
+    while (idx < tokens.length && (tokens[idx].type === TokenType.SPACE || tokens[idx].type === TokenType.TAB)) { indent += tokens[idx].type === TokenType.TAB ? 4 : 1; idx++; }
+    if (idx >= tokens.length) return null;
+    const depth = 1 + Math.floor(indent / 2);
+    const t = tokens[idx];
+    if ((t.type === TokenType.DASH || t.type === TokenType.PLUS || t.type === TokenType.ASTERISK) && idx + 1 < tokens.length && tokens[idx + 1].type === TokenType.SPACE) return { depth, ordered: false };
+    if (t.type === TokenType.DIGIT_SEQUENCE && idx + 2 < tokens.length && tokens[idx + 1].type === TokenType.PERIOD && tokens[idx + 2].type === TokenType.SPACE) {
+      const n = parseInt(t.content, 10); return { depth, ordered: true, number: isNaN(n) ? undefined : n };
     }
+    return null;
+  }
+
+  private detectListMarkerFromTokens(tokens: Token[]): { depth: number; ordered: boolean; number?: number } | null {
+    let indent = 0; let idx = 0;
+    while (idx < tokens.length && (tokens[idx].type === TokenType.SPACE || tokens[idx].type === TokenType.TAB)) { indent += tokens[idx].type === TokenType.TAB ? 4 : 1; idx++; }
+    if (idx >= tokens.length) return null;
+    const depth = 1 + Math.floor(indent / 2);
+    const t = tokens[idx];
+    if ((t.type === TokenType.DASH || t.type === TokenType.PLUS || t.type === TokenType.ASTERISK) && idx + 1 < tokens.length && tokens[idx + 1].type === TokenType.SPACE) return { depth, ordered: false };
+    if (t.type === TokenType.DIGIT_SEQUENCE && idx + 2 < tokens.length && tokens[idx + 1].type === TokenType.PERIOD && tokens[idx + 2].type === TokenType.SPACE) {
+      const n = parseInt(t.content, 10); return { depth, ordered: true, number: isNaN(n) ? undefined : n };
+    }
+    return null;
   }
 }
+
+

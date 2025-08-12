@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { View, Text, TextInput, TouchableOpacity, FlatList, StyleSheet, Alert, KeyboardAvoidingView, Platform, Keyboard, Modal } from 'react-native';
+import { ScrollView as GHScrollView } from 'react-native-gesture-handler';
 import Clipboard from '@react-native-clipboard/clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StackNavigationProp } from '@react-navigation/stack';
@@ -21,6 +22,63 @@ interface Props {
   route: ChatScreenRouteProp;
 }
 
+// Dedicated code block component to handle accurate content width and indicator spacing
+const HorizontalCodeBlock: React.FC<{
+  content: string;
+  baseFontSize: number;
+  baseLineHeight: number;
+  unicodeStyle: any;
+}> = ({ content, baseFontSize, baseLineHeight, unicodeStyle }) => {
+  const [maxLineWidth, setMaxLineWidth] = useState(0);
+
+  const onLineLayout = (e: any) => {
+    const w = e?.nativeEvent?.layout?.width ?? 0;
+    if (w > maxLineWidth) setMaxLineWidth(w);
+  };
+
+  const lines = React.useMemo(() => String(content).split('\n'), [content]);
+
+  return (
+    <View style={{ width: '100%', alignSelf: 'stretch' }}>
+      <GHScrollView
+        horizontal
+        bounces={false}
+        showsHorizontalScrollIndicator
+        nestedScrollEnabled
+        directionalLockEnabled
+        keyboardShouldPersistTaps="handled"
+        onStartShouldSetResponderCapture={() => true}
+        onMoveShouldSetResponderCapture={() => true}
+        style={{ maxWidth: '100%', flexGrow: 0, flexShrink: 0 }}
+        contentContainerStyle={{ flexGrow: 0, paddingBottom: 0 }}
+        scrollEventThrottle={16}
+        //scrollIndicatorInsets={Platform.OS === 'ios' ? { bottom: 8 } : undefined as any}
+      >
+        <View style={{ flexDirection: 'column', alignSelf: 'flex-start', width: maxLineWidth > 0 ? maxLineWidth : undefined }}>
+          {lines.map((ln, i) => (
+            <Text
+              key={i}
+              numberOfLines={1}
+              onLayout={onLineLayout}
+              style={[
+                unicodeStyle,
+                {
+                  fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                  fontSize: baseFontSize * 0.9,
+                  lineHeight: baseLineHeight,
+                  includeFontPadding: false
+                }
+              ]}
+            >
+              {ln.length === 0 ? ' ' : ln}
+            </Text>
+          ))}
+        </View>
+      </GHScrollView>
+    </View>
+  );
+};
+
 // Helper component to render streaming text with character-by-character reveal
 const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: { content: string, isStreaming: boolean, style: any, isAssistant?: boolean, messageId?: string }) => {
   const [revealedLength, setRevealedLength] = useState(0);
@@ -32,7 +90,6 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
 
   // Streaming markdown parser state
   const [currentAST, setCurrentAST] = useState<MarkdownASTNode[]>([]);
-  const lastProcessedContentRef = useRef('');
 
   const streamingProcessor = useMemo(() =>
     new StreamingMarkdownProcessor(),
@@ -52,7 +109,6 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
       console.log('🔄 Resetting streaming processor for new message');
       streamingProcessor.reset();
       setCurrentAST([]);
-      lastProcessedContentRef.current = '';
       lastMessageIdRef.current = messageId;
     }
   }, [messageId, isAssistant]);
@@ -77,7 +133,6 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
       // Process the full content up to the visible length
       const newAST = streamingProcessor.appendText(content, revealedLength);
       setCurrentAST(newAST.type === 'document' ? newAST.children : []);
-      lastProcessedContentRef.current = visibleContent;
     }
   }, [revealedLength, content, isAssistant, hasStartedRevealing, messageId]);
 
@@ -198,7 +253,10 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
 
   // Custom AST renderer for streaming markdown
   const renderAST = React.useCallback((ast: MarkdownASTNode[]): React.ReactNode => {
-    const unicodeStyle = { fontFamily: Platform.OS === 'ios' ? 'System' : 'Roboto' };
+    const unicodeStyle = {} as const;
+    const baseFontSize: number = (style as any)?.fontSize ?? 16;
+    const baseLineHeight: number = (style as any)?.lineHeight ?? Math.round(baseFontSize * 1.4);
+    const baseTextStyle = { fontSize: baseFontSize, lineHeight: baseLineHeight } as const;
     return ast.map((node, index) => {
       switch (node.type) {
         case 'paragraph':
@@ -209,10 +267,12 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
           );
         case 'heading':
           const headingLevel = node.metadata?.level || 1;
+          const headingScales = [1.6, 1.4, 1.2, 1.1, 1.05, 1.0];
+          const headingScale = headingScales[Math.max(0, Math.min(5, headingLevel - 1))];
           const headingStyle = [
             style,
             {
-              fontSize: style.fontSize * (1.5 - headingLevel * 0.1),
+              fontSize: baseFontSize * headingScale,
               fontWeight: 'bold',
               marginVertical: 6
             }
@@ -222,18 +282,41 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
               {renderAST(node.children)}
             </Text>
           );
+        case 'list_item':
+          return (
+            <View key={index} style={{ flexDirection: 'row', alignItems: 'flex-start', marginLeft: (node.metadata?.depth || 1) * 12, marginVertical: 2 }}>
+              <Text style={[baseTextStyle, { width: 18 }]}>
+                {node.metadata?.ordered ? `${node.metadata.number ?? ''}.` : '•'}
+              </Text>
+              <Text style={[baseTextStyle, { flexShrink: 1 }]}>
+                {renderAST(node.children)}
+              </Text>
+            </View>
+          );
         case 'text':
-          return <Text key={index} style={unicodeStyle}>{node.content}</Text>;
+          return <Text key={index} style={baseTextStyle}>{node.content}</Text>;
         case 'strong':
-          return <Text key={index} style={[unicodeStyle, { fontWeight: 'bold' }]}>{renderAST(node.children)}</Text>;
+          return <Text key={index} style={[baseTextStyle, { fontWeight: 'bold', fontStyle: 'normal' }]}>{renderAST(node.children)}</Text>;
+        case 'strong_emphasis':
+          return (
+            <Text key={index} style={[baseTextStyle, { fontWeight: 'bold', fontStyle: 'italic' }]}>
+              {renderAST(node.children)}
+            </Text>
+          );
         case 'emphasis':
-          return <Text key={index} style={[unicodeStyle, { fontStyle: 'italic' }]}>{renderAST(node.children)}</Text>;
+          return <Text key={index} style={[baseTextStyle, { fontStyle: 'italic' }]}>{renderAST(node.children)}</Text>;
+        case 'strikethrough':
+          return (
+            <Text key={index} style={[baseTextStyle, { textDecorationLine: 'line-through' }]}>
+              {renderAST(node.children)}
+            </Text>
+          );
         case 'code_inline':
           return (
             <Text
               key={index}
               style={[
-                unicodeStyle,
+                baseTextStyle,
                 {
                   fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
                   backgroundColor: 'rgba(0,0,0,0.1)',
@@ -250,7 +333,7 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
             <Text
               key={index}
               style={[
-                unicodeStyle,
+                baseTextStyle,
                 {
                   color: '#007AFF',
                   textDecorationLine: 'underline'
@@ -267,30 +350,69 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
                 style={{
                   backgroundColor: 'rgba(0,0,0,0.05)',
                   borderRadius: 6,
-                  padding: 12,
+                  
                   borderLeftWidth: 3,
                   borderLeftColor: '#007AFF'
                 }}
               >
-                <Text
-                  style={[
-                    unicodeStyle,
-                    {
-                      fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-                      fontSize: style.fontSize * 0.9,
-                      lineHeight: style.fontSize * 1.4
-                    }
-                  ]}
-                >
-                  {node.content}
-                </Text>
+                {node.metadata?.language && node.metadata.language.toLowerCase() === 'markdown' ? (
+                  <Text
+                    style={[
+                      unicodeStyle,
+                      {
+                        fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                        fontSize: baseFontSize * 0.9,
+                        lineHeight: baseLineHeight
+                      }
+                    ]}
+                  >
+                    {node.content}
+                  </Text>
+                ) : (
+                  <View style={{ width: '100%', alignSelf: 'stretch' }}>
+                    <GHScrollView
+                      horizontal
+                      bounces={false}
+                      showsHorizontalScrollIndicator
+                      nestedScrollEnabled
+                      directionalLockEnabled
+                      keyboardShouldPersistTaps="handled"
+                      onStartShouldSetResponderCapture={() => true}
+                      onMoveShouldSetResponderCapture={() => true}
+                      style={{ maxWidth: '100%', flexGrow: 0, flexShrink: 0 }}
+                      contentContainerStyle={{ flexGrow: 0, paddingBottom: 12,paddingLeft: 12,
+                        paddingTop: 6,
+                        paddingRight: 6, }}
+                      scrollEventThrottle={16}
+                    >
+                      <HorizontalCodeBlock
+                        content={String(node.content)}
+                        baseFontSize={baseFontSize}
+                        baseLineHeight={baseLineHeight}
+                        unicodeStyle={unicodeStyle}
+                      />
+                    </GHScrollView>
+                  </View>
+                )}
               </View>
             </View>
           );
         case 'document':
-          return <View key={index} style={style}>{renderAST(node.children)}</View>;
-        case 'paragraph':
-          return <View key={index} style={style}>{renderAST(node.children)}</View>;
+          return (
+            <View key={index} style={style}>
+              {renderAST(node.children)}
+            </View>
+          );
+        case 'blockquote':
+          return (
+            <View key={index} style={{ borderLeftWidth: 3, borderLeftColor: '#C7C7CC', paddingLeft: 10, marginVertical: 6 }}>
+              <Text style={[style, { color: '#333' }]}>
+                {renderAST(node.children)}
+              </Text>
+            </View>
+          );
+        case 'hr':
+          return <View key={index} style={{ height: StyleSheet.hairlineWidth, backgroundColor: '#C7C7CC', marginVertical: 8 }} />;
         default:
           node satisfies never;
       }
@@ -490,6 +612,7 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
         item.role === 'user' ? styles.userMessage : styles.assistantMessage
       ]}
       onLongPress={() => handleLongPressMessage(item)}
+      delayLongPress={350}
       activeOpacity={0.7}
     >
       <StreamingText

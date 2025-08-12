@@ -17,7 +17,7 @@
  * render AST"
  */
 
-import { MarkdownTokenizer } from './MarkdownTokenizer';
+import { MarkdownTokenizer } from './SimpleMarkdownTokenizer';
 import { MarkdownParser, MarkdownASTNode, hasContent, hasChildren } from './MarkdownParser';
 
 export class StreamingMarkdownProcessor {
@@ -41,7 +41,7 @@ export class StreamingMarkdownProcessor {
     const newlyVisibleText = content.substring(this.processedChars, actualVisibleLength);
     
     if (newlyVisibleText.length === 0 ) {
-        return this.createTentativeAST();
+      return this.createTentativeAST();
     }
     
     // Process character by character through the pipeline
@@ -60,7 +60,9 @@ export class StreamingMarkdownProcessor {
     this.processedChars = actualVisibleLength;
     
     // Create tentative AST with extra content
-    const tentativeAST = this.createTentativeAST();
+    const tentativeAST = newTokens.length === 0
+      ? this.createTentativeAST(newlyVisibleText)
+      : this.createTentativeAST();
     
     // Notify of AST update
     if (this.onASTUpdate && newTokens.length > 0) {
@@ -123,13 +125,12 @@ export class StreamingMarkdownProcessor {
   /**
    * Create tentative AST with buffered content for smooth rendering
    */
-  private createTentativeAST(): MarkdownASTNode {
+  private createTentativeAST(extraVisible?: string): MarkdownASTNode {
     // Get current AST
     const currentAST = this.parser.getASTReference();
     
     // Calculate extra content from buffered tokens and tokenizer buffer
     const bufferedTokens = this.parser.getBufferedTokens();
-    const tokenizerBuffer = this.tokenizer.getBufferedChars();
     
     // Combine buffered content
     let extraContent = '';
@@ -141,14 +142,21 @@ export class StreamingMarkdownProcessor {
       }
     }
     
-    // Add content from tokenizer buffer
-    extraContent += tokenizerBuffer;
+    // Include newly visible characters that did not emit tokens (common for plain text)
+    if (extraVisible) {
+      extraContent += extraVisible;
+    }
     
-    // Don't add preview of remaining content for tests - only use buffered content
-    // In production, you might want a small preview for smoother transitions
-    
-    // If no extra content, return current AST
+    // If no extra content, still return a paragraph with tentative text when provided
     if (extraContent.length === 0) {
+      if (extraVisible && extraVisible.length > 0) {
+        // Feed visible text through tokenizer+parser to get consistent structure
+        for (const ch of extraVisible) {
+          const tokens = this.tokenizer.accept(ch);
+          for (const token of tokens) this.parser.accept(token);
+        }
+        return this.parser.getASTReference();
+      }
       return currentAST;
     }
     

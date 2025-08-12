@@ -2,6 +2,8 @@
  * @format
  */
 
+// Gesture handler must be imported at the very top
+import 'react-native-gesture-handler';
 // Import URL polyfill for React Native
 import 'react-native-url-polyfill/auto';
 

@@ -1,0 +1,60 @@
+# Markdown Grammar (Context-Free Subset)
+# This grammar covers the streaming markdown features we support
+
+# Top-level document structure
+Document ::= Block*
+
+Block ::= Heading | CodeBlock | List | Paragraph | EmptyLine
+
+# Block-level elements
+Heading ::= HASH+ SPACE InlineContent NEWLINE
+CodeBlock ::= TRIPLE_BACKTICK Language? NEWLINE CodeContent TRIPLE_BACKTICK NEWLINE?
+Language ::= TEXT
+CodeContent ::= (TEXT | SPACE | TAB | NEWLINE)*
+List ::= ListItem+
+ListItem ::= ListMarker SPACE InlineContent NEWLINE
+ListMarker ::= DASH | PLUS | (DIGIT_SEQUENCE PERIOD)
+Paragraph ::= InlineContent NEWLINE
+EmptyLine ::= NEWLINE
+
+# Inline elements (can be nested)
+InlineContent ::= InlineElement*
+InlineElement ::= Text | Bold | Italic | Code | Link
+
+Text ::= TEXT | SPACE | TAB | 
+         HASH | PERIOD | DASH | PLUS | DIGIT_SEQUENCE |  # These are text when not in special contexts
+         BRACKET_OPEN | BRACKET_CLOSE |                   # Square brackets when not part of links
+         PAREN_OPEN | PAREN_CLOSE                         # Parentheses when not part of links
+
+Bold ::= DOUBLE_ASTERISK InlineContent DOUBLE_ASTERISK
+Italic ::= ASTERISK InlineContent ASTERISK  
+Code ::= BACKTICK InlineContent BACKTICK
+Link ::= BRACKET_OPEN InlineContent BRACKET_CLOSE PAREN_OPEN LinkURL PAREN_CLOSE
+LinkURL ::= (TEXT | SPACE)*  # Simplified - real URLs are more complex
+
+# Terminals (tokens from tokenizer)
+HASH ::= "#"
+ASTERISK ::= "*"
+DOUBLE_ASTERISK ::= "**"
+BACKTICK ::= "`"
+TRIPLE_BACKTICK ::= "```"
+BRACKET_OPEN ::= "["
+BRACKET_CLOSE ::= "]"
+PAREN_OPEN ::= "("
+PAREN_CLOSE ::= ")"
+DASH ::= "-"
+PLUS ::= "+"
+PERIOD ::= "."
+DIGIT_SEQUENCE ::= [0-9]+
+SPACE ::= " "
+TAB ::= "\t"
+NEWLINE ::= "\n"
+TEXT ::= [any other characters]
+EOF ::= end of input
+
+# Grammar Notes:
+# 1. Precedence: Block elements > Inline elements
+# 2. Nesting: Inline elements can nest within other inline elements
+# 3. Ambiguity resolution: Use longest match, left-to-right parsing
+# 4. Context sensitivity: Some tokens (like HASH) are only special at start of line
+# 5. Streaming: Parser should be able to handle incomplete input gracefully
