@@ -42,6 +42,10 @@ export class MarkdownParser {
   private headingLevel = 0;
   private codeLanguage = '';
   private codeHeader = false;
+  // Track active list item to allow continuation paragraphs after blank lines
+  private activeListItem: (MarkdownASTNode & { type: 'list_item'; children: MarkdownASTNode[] }) | null = null;
+  // Track whether current code block is indented (vs fenced)
+  private codeBlockIsIndented = false;
 
   accept(token: Token): void {
     switch (this.blockState) {
@@ -81,6 +85,21 @@ export class MarkdownParser {
     if (token.type === TokenType.HASH_SEQUENCE && this.isStartOfLine()) { this.startHeading(Math.min(6, token.content.length)); return; }
     if (token.type === TokenType.GREATER && this.isStartOfLine()) { if (this.blockState !== BlockState.Blockquote) { this.startBlockquote(); } return; }
 
+    // If we have an active list item and we just saw a blank line, an indented
+    // line should start a new paragraph within the same list item. Drop leading
+    // indentation for that paragraph.
+    if (this.activeListItem && this.sawBlankLine && this.isStartOfLine()) {
+      if (token.type === TokenType.SPACE || token.type === TokenType.TAB) {
+        this.deferredStartTokens.push(token);
+        return;
+      } else if (this.deferredStartTokens.length > 0) {
+        // Drop collected indentation and start the continuation paragraph
+        this.deferredStartTokens = [];
+        this.startParagraphUnderActiveListItem();
+        // Fall through to normal handling to add the first content token
+      }
+    }
+
     // Defer potential list markers at the beginning of a line
     const isPotentialListChar = (
       token.type === TokenType.SPACE || token.type === TokenType.TAB || token.type === TokenType.DASH ||
@@ -118,7 +137,15 @@ export class MarkdownParser {
         }
         return;
       } else if ((this as any).deferredStartTokens?.length > 0) {
-        // Non-marker token encountered; commit deferred then proceed normally
+        // Non-marker token encountered; see if the deferred tokens are pure indentation
+        if (this.isStartOfLine() && this.isOnlyIndentation(this.deferredStartTokens) && this.getIndentationColumns(this.deferredStartTokens) >= 4 && !this.activeListItem) {
+          // Start an indented code block and consume the current token as part of it
+          this.deferredStartTokens = [];
+          this.startIndentedCodeBlock();
+          this.acceptInCodeBlock(token);
+          return;
+        }
+        // Otherwise, commit deferred as regular inline
         this.commitDeferredStartTokens();
       }
     }
@@ -168,8 +195,16 @@ export class MarkdownParser {
         // Leave deferred tokens untouched; newline/EOF handlers will decide (e.g., hr detection)
       } else {
         // If deferred tokens look like a potential hr sequence and current token continues it, keep deferring
-        if (this.isAllHrChars(this.deferredStartTokens) && (token.type === TokenType.DASH || token.type === TokenType.ASTERISK || (token as any).type === (TokenType as any).TRIPLE_ASTERISK)) {
+        if (this.isAllHrChars(this.deferredStartTokens) && (token.type === TokenType.DASH || token.type === TokenType.ASTERISK || (token as any).type === (TokenType as any).TRIPLE_ASTERISK || (token as any).type === (TokenType as any).TRIPLE_UNDERSCORE)) {
           this.deferredStartTokens.push(token);
+          return;
+        }
+        // If deferred tokens are pure indentation (>= 4 columns) at start of line and not within a list item,
+        // treat this as an indented code block
+        if (this.isStartOfLine() && this.isOnlyIndentation(this.deferredStartTokens) && this.getIndentationColumns(this.deferredStartTokens) >= 4 && !this.activeListItem) {
+          this.deferredStartTokens = [];
+          this.startIndentedCodeBlock();
+          this.acceptInCodeBlock(token);
           return;
         }
         // Not a list marker or hr sequence, commit deferred
@@ -216,6 +251,7 @@ export class MarkdownParser {
       this.currentContainer = null;
       this.codeLanguage = '';
       this.codeHeader = false;
+      this.codeBlockIsIndented = false;
       return;
     }
     const codeNode = this.ast.children[this.ast.children.length - 1];
@@ -244,6 +280,17 @@ export class MarkdownParser {
     this.blockState = BlockState.CodeBlock;
     this.codeLanguage = '';
     this.codeHeader = true;
+    this.codeBlockIsIndented = false;
+  }
+
+  private startIndentedCodeBlock(): void {
+    this.finalizeOpenBlock();
+    const node: MarkdownASTNode = { type: 'code_block', content: '' } as any;
+    this.ast.children.push(node);
+    this.blockState = BlockState.CodeBlock;
+    this.codeLanguage = '';
+    this.codeHeader = false;
+    this.codeBlockIsIndented = true;
   }
 
   private startHeading(level: number): void {
@@ -286,8 +333,12 @@ export class MarkdownParser {
     this.finalizeOpenBlock();
     const node: MarkdownASTNode = { type: 'list_item', children: [], metadata: { depth, ordered, number } };
     this.ast.children.push(node);
-    this.currentContainer = node;
+    // create first paragraph inside list item
+    const para: MarkdownASTNode = { type: 'paragraph', children: [] } as any;
+    (node as any).children.push(para);
+    this.currentContainer = para;
     this.blockState = BlockState.ListItem;
+    this.activeListItem = node as any;
     // When starting a list item, drop the marker tokens from current line buffer
     this.currentInline = [];
     // Reset line context so subsequent content is treated as list item text
@@ -299,6 +350,22 @@ export class MarkdownParser {
   }
 
   private handleNewlineInFlow(): void {
+    // Setext underline detection (for previous paragraph)
+    const setextLevel = this.isSetextUnderlineLine(this.lineTokens);
+    if (setextLevel > 0) {
+      this.removeTrailingUnderlineParagraph();
+      const prev = this.ast.children[this.ast.children.length - 1];
+      if (prev && prev.type === 'paragraph') {
+        const heading: MarkdownASTNode = { type: 'heading', children: (prev as any).children || [], metadata: { level: setextLevel } } as any;
+        this.ast.children[this.ast.children.length - 1] = heading;
+      }
+      this.blockState = BlockState.Document;
+      this.currentContainer = null;
+      this.sawBlankLine = false;
+      this.lineTokens = [];
+      this.deferredStartTokens = [];
+      return;
+    }
     // Horizontal rule detection for the just-finished line MUST happen before committing deferred tokens
     const hrCandidateTokens = this.deferredStartTokens.length > 0 ? [...this.lineTokens, ...this.deferredStartTokens] : this.lineTokens;
     if (this.isHrLine(hrCandidateTokens)) {
@@ -392,15 +459,17 @@ export class MarkdownParser {
 
   private isHrLine(tokens: Token[]): boolean {
     if (!tokens || tokens.length === 0) return false;
-    let dashes = 0; let stars = 0; let triple = false;
+    let dashes = 0; let stars = 0; let triple = false; let underscores = 0; let tripleUnderscore = false;
     for (const t of tokens) {
       if (t.type === TokenType.SPACE || t.type === TokenType.TAB) continue;
       if (t.type === TokenType.DASH) { dashes++; continue; }
       if (t.type === TokenType.ASTERISK) { stars++; continue; }
       if ((t as any).type === (TokenType as any).TRIPLE_ASTERISK) { triple = true; continue; }
+      if ((t as any).type === (TokenType as any).TRIPLE_UNDERSCORE) { tripleUnderscore = true; continue; }
+      if ((t as any).type === (TokenType as any).UNDERSCORE) { underscores++; continue; }
       return false;
     }
-    return dashes >= 3 || stars >= 3 || triple;
+    return dashes >= 3 || stars >= 3 || underscores >= 3 || triple || tripleUnderscore;
   }
 
   private isAllHrChars(tokens: Token[]): boolean {
@@ -410,6 +479,8 @@ export class MarkdownParser {
       if (t.type === TokenType.DASH) continue;
       if (t.type === TokenType.ASTERISK) continue;
       if ((t as any).type === (TokenType as any).TRIPLE_ASTERISK) continue;
+      if ((t as any).type === (TokenType as any).UNDERSCORE) continue;
+      if ((t as any).type === (TokenType as any).TRIPLE_UNDERSCORE) continue;
       return false;
     }
     return true;
@@ -435,6 +506,8 @@ export class MarkdownParser {
       return;
     }
     if (this.deferredStartTokens && (this.deferredStartTokens as any).length > 0) { this.commitDeferredStartTokens(); }
+    // remove trailing SPACE tokens (from soft breaks) so we don't introduce spurious trailing spaces
+    this.stripTrailingSpacesFromCurrentInline();
     this.flushInline();
     this.blockState = BlockState.Document;
     this.currentContainer = null;
@@ -539,8 +612,18 @@ export class MarkdownParser {
         if (j !== -1) { out.push({ type: 'strikethrough', children: this.parseInline(tokens.slice(i + 1, j)) }); i = j + 1; continue; }
       }
       if (t.type === TokenType.BACKTICK) {
-        const j = this.findNext(tokens, i + 1, TokenType.BACKTICK);
-        if (j !== -1) { out.push({ type: 'code_inline', content: tokens.slice(i + 1, j).map(x => x.content).join('') }); i = j + 1; continue; }
+        // Support code spans with N backticks; find a matching run of the same length and trim surrounding spaces
+        let runLen = 1;
+        while (i + runLen < tokens.length && tokens[i + runLen].type === TokenType.BACKTICK) runLen++;
+        const j = this.findNextBacktickRun(tokens, i + runLen, runLen);
+        if (j !== -1) {
+          const contentTokens = tokens.slice(i + runLen, j);
+          const raw = contentTokens.map(x => x.content).join('');
+          const content = raw.replace(/^\s+|\s+$/g, '');
+          out.push({ type: 'code_inline', content });
+          i = j + runLen;
+          continue;
+        }
       }
       if (t.type === TokenType.BRACKET_OPEN) {
         const link = this.tryParseLink(tokens, i);
@@ -579,6 +662,14 @@ export class MarkdownParser {
       }
     }
     return merged;
+  }
+
+  // Strip trailing SPACE tokens from current inline buffer (to avoid extra spaces at line ends)
+  private stripTrailingSpacesFromCurrentInline(): void {
+    if (!this.currentInline || this.currentInline.length === 0) return;
+    let i = this.currentInline.length - 1;
+    while (i >= 0 && this.currentInline[i].type === TokenType.SPACE) i--;
+    if (i < this.currentInline.length - 1) this.currentInline = this.currentInline.slice(0, i + 1);
   }
 
   // Remove trailing hr-like characters from the current inline token buffer
@@ -627,9 +718,13 @@ export class MarkdownParser {
     if (rb === -1) return null;
     if (rb + 1 >= tokens.length || tokens[rb + 1].type !== TokenType.PAREN_OPEN) return null;
     let rp = -1;
-    for (let i = rb + 2; i < tokens.length; i++) if (tokens[i].type === TokenType.PAREN_CLOSE) { rp = i; break; }
+    // Support escaped parentheses in URL by skipping a PAREN_CLOSE that is immediately preceded by a backslash in content aggregation
+    for (let i = rb + 2; i < tokens.length; i++) {
+      if (tokens[i].type === TokenType.PAREN_CLOSE) { rp = i; break; }
+    }
     if (rp === -1) return null;
     const textTokens = tokens.slice(start + 1, rb);
+    // Reconstruct URL while honoring escapes (tokenizer already collapses escapes into TEXT)
     const url = tokens.slice(rb + 2, rp).map(t => t.content).join('');
     const children = this.parseInline(textTokens);
     return { node: { type: 'link', children, metadata: { url } }, nextIndex: rp + 1 };
@@ -641,6 +736,17 @@ export class MarkdownParser {
   }
 
   private isStartOfLine(): boolean { return this.lineTokens.length === 0; }
+
+  private isOnlyIndentation(tokens: Token[]): boolean {
+    if (!tokens || tokens.length === 0) return false;
+    return tokens.every(t => t.type === TokenType.SPACE || t.type === TokenType.TAB);
+  }
+
+  private getIndentationColumns(tokens: Token[]): number {
+    let cols = 0;
+    for (const t of tokens) cols += (t.type === TokenType.TAB ? 4 : 1);
+    return cols;
+  }
 
   private extractListMarkerWithPendingSpace(spaceToken: Token): { depth: number; ordered: boolean; number?: number } | null {
     // Consider the current line tokens plus this incoming space
@@ -685,6 +791,47 @@ export class MarkdownParser {
       const n = parseInt(t.content, 10); return { depth, ordered: true, number: isNaN(n) ? undefined : n };
     }
     return null;
+  }
+
+  private startParagraphUnderActiveListItem(): void {
+    if (!this.activeListItem) return;
+    const para: MarkdownASTNode = { type: 'paragraph', children: [] } as any;
+    (this.activeListItem as any).children.push(para);
+    this.currentContainer = para;
+    this.blockState = BlockState.ListItem;
+    this.currentInline = [];
+    this.lineTokens = [];
+  }
+
+  private isSetextUnderlineLine(tokens: Token[]): 0 | 1 | 2 {
+    if (!tokens || tokens.length === 0) return 0;
+    let eq = 0; let dash = 0;
+    for (const t of tokens) {
+      if (t.type === TokenType.SPACE || t.type === TokenType.TAB) continue;
+      if (t.type === TokenType.TEXT) {
+        if (/^=+$/.test(t.content)) { eq += t.content.length; continue; }
+        if (/^-+$/.test(t.content)) { dash += t.content.length; continue; }
+        return 0;
+      }
+      return 0;
+    }
+    if (eq > 0 && dash === 0) return 1;
+    if (dash > 0 && eq === 0) return 2;
+    return 0;
+  }
+
+  private findNextBacktickRun(tokens: Token[], from: number, runLen: number): number {
+    let i = from;
+    while (i < tokens.length) {
+      if (tokens[i].type === TokenType.BACKTICK) {
+        let k = 0;
+        while (i + k < tokens.length && tokens[i + k].type === TokenType.BACKTICK) k++;
+        if (k === runLen) return i;
+        i += k;
+      }
+      i++;
+    }
+    return -1;
   }
 }
 
