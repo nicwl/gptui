@@ -91,6 +91,7 @@ describe('MarkdownParser (AST snapshots)', () => {
     { name: 'triple asterisk yields bold+italic', input: '***text***' },
     { name: 'strikethrough', input: '~~text~~' },
     { name: 'mixed strong+strike', input: '**~~gone~~** and ~~**gone too**~~' },
+    { name: 'escaped asterisks render as literal text', input: '\\*This text is not italic because the asterisks are escaped.\\*' },
   ])('$name', ({ input }) => {
       const ast = parseMarkdown(input);
     expect(ast).toMatchSnapshot();

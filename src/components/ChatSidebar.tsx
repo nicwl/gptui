@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Thread } from '../types';
+import Haptics from '../utils/Haptics';
 
 type Props = {
   visible: boolean;
@@ -108,7 +109,14 @@ export const ChatSidebar: React.FC<Props> = ({
 
   return (
     <View style={styles.absoluteFill} pointerEvents="box-none">
-      <TouchableOpacity activeOpacity={1} onPress={onClose} style={styles.absoluteFill}>
+      <TouchableOpacity
+        activeOpacity={1}
+        onPress={() => {
+          Haptics.selection();
+          onClose();
+        }}
+        style={styles.absoluteFill}
+      >
         <Animated.View style={[styles.dim, { opacity: dimOpacity }]} />
         <Animated.View
           style={[
@@ -119,17 +127,25 @@ export const ChatSidebar: React.FC<Props> = ({
           <View style={styles.header}>
             <Text style={styles.headerTitle}>Chats</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <TouchableOpacity onPress={() => {
-                if (isSelecting) {
-                  setIsSelecting(false);
-                  setSelectedIds(new Set());
-                } else {
-                  setIsSelecting(true);
-                }
-              }}>
+              <TouchableOpacity
+                onPress={() => {
+                  Haptics.selection();
+                  if (isSelecting) {
+                    setIsSelecting(false);
+                    setSelectedIds(new Set());
+                  } else {
+                    setIsSelecting(true);
+                  }
+                }}
+              >
                 <Text style={styles.edit}>{isSelecting ? 'Cancel' : 'Edit'}</Text>
               </TouchableOpacity>
-              <TouchableOpacity onPress={onClose}>
+              <TouchableOpacity
+                onPress={() => {
+                  Haptics.selection();
+                  onClose();
+                }}
+              >
                 <Text style={styles.close}>✕</Text>
               </TouchableOpacity>
             </View>
@@ -150,12 +166,15 @@ export const ChatSidebar: React.FC<Props> = ({
                       const next = new Set(selectedIds);
                       if (next.has(item.id)) next.delete(item.id); else next.add(item.id);
                       setSelectedIds(next);
+                      Haptics.selection();
                     } else {
+                      Haptics.selection();
                       onSelectThread(item.id);
                     }
                   }}
                   onLongPress={() => {
                     if (!isSelecting) {
+                      Haptics.selection();
                       setIsSelecting(true);
                       const next = new Set<string>();
                       next.add(item.id);
@@ -195,8 +214,10 @@ export const ChatSidebar: React.FC<Props> = ({
                   onPress={async () => {
                     const ids = Array.from(selectedIds);
                     if (ids.length === 0) return;
+                    Haptics.selection();
                     animateLayout();
                     await onDeleteSelected(ids);
+                    Haptics.success();
                     setSelectedIds(new Set());
                     setIsSelecting(false);
                   }}
@@ -206,7 +227,13 @@ export const ChatSidebar: React.FC<Props> = ({
                   <Text style={styles.deleteText}>Delete</Text>
                 </TouchableOpacity>
               ) : (
-                <TouchableOpacity onPress={onSettingsPress} style={styles.settingsBtn}>
+                <TouchableOpacity
+                  onPress={() => {
+                    Haptics.selection();
+                    onSettingsPress();
+                  }}
+                  style={styles.settingsBtn}
+                >
                   <Text style={styles.settingsText}>Settings</Text>
                 </TouchableOpacity>
               )}

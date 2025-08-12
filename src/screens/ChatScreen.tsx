@@ -11,6 +11,7 @@ import { NavigationParams, Message } from '../types';
 import ChatSidebar from '../components/ChatSidebar';
 import { ModelSelectionModal, AVAILABLE_MODELS } from '../components/ModelSelectionModal.tsx';
 import { StreamingMarkdownProcessor } from '../utils/StreamingMarkdownProcessor';
+import Haptics from '../utils/Haptics';
 import { MarkdownASTNode, hasContent, hasChildren } from '../utils/MarkdownParser';
 
 
@@ -240,162 +241,195 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
     const baseFontSize: number = (style as any)?.fontSize ?? 16;
     const baseLineHeight: number = (style as any)?.lineHeight ?? Math.round(baseFontSize * 1.4);
     const baseTextStyle = { fontSize: baseFontSize, lineHeight: baseLineHeight } as const;
-    return ast.map((node, index) => {
-      switch (node.type) {
-        case 'paragraph':
-          return (
-            <Text key={index} style={style}>
-              {renderAST(node.children || [])}
-            </Text>
-          );
-        case 'heading':
-          const headingLevel = node.metadata?.level || 1;
-          const headingScales = [1.6, 1.4, 1.2, 1.1, 1.05, 1.0];
-          const headingScale = headingScales[Math.max(0, Math.min(5, headingLevel - 1))];
-          const headingStyle = [
-            style,
-            {
-              fontSize: baseFontSize * headingScale,
-              fontWeight: 'bold',
-              marginVertical: 6
-            }
-          ];
-          return (
-            <Text key={index} style={headingStyle}>
-              {renderAST(node.children)}
-            </Text>
-          );
-        case 'list_item':
-          return (
-            <View key={index} style={{ flexDirection: 'row', alignItems: 'flex-start', marginLeft: (node.metadata?.depth || 1) * 12, marginVertical: 2 }}>
-              <Text style={[baseTextStyle, { width: 18 }]}>
-                {node.metadata?.ordered ? `${node.metadata.number ?? ''}.` : '•'}
+
+    const renderNodes = (nodes: MarkdownASTNode[], inheritedTextStyle: any): React.ReactNode[] => {
+      return nodes.map((node, index) => {
+        switch (node.type) {
+          case 'paragraph':
+            return (
+              <Text key={index} style={style}>
+                {renderNodes(node.children || [], inheritedTextStyle)}
               </Text>
-              <Text style={[baseTextStyle, { flexShrink: 1 }]}>
-                {renderAST(node.children)}
+            );
+          case 'heading': {
+            const headingLevel = node.metadata?.level || 1;
+            const headingScales = [1.6, 1.4, 1.2, 1.1, 1.05, 1.0];
+            const headingScale = headingScales[Math.max(0, Math.min(5, headingLevel - 1))];
+            const headingTextStyle = [
+              inheritedTextStyle,
+              {
+                fontSize: baseFontSize * headingScale,
+                lineHeight: Math.round(baseLineHeight * headingScale),
+              },
+            ];
+            const headingContainerStyle = [
+              style,
+              {
+                fontSize: baseFontSize * headingScale,
+                lineHeight: Math.round(baseLineHeight * headingScale),
+                fontWeight: 'bold',
+                marginVertical: 6,
+              },
+            ];
+            return (
+              <Text key={index} style={headingContainerStyle}>
+                {renderNodes(node.children, headingTextStyle)}
               </Text>
-            </View>
-          );
-        case 'text':
-          return <Text key={index} style={baseTextStyle}>{node.content}</Text>;
-        case 'strong':
-          return <Text key={index} style={[baseTextStyle, { fontWeight: 'bold', fontStyle: 'normal' }]}>{renderAST(node.children)}</Text>;
-        case 'strong_emphasis':
-          return (
-            <Text key={index} style={[baseTextStyle, { fontWeight: 'bold', fontStyle: 'italic' }]}>
-              {renderAST(node.children)}
-            </Text>
-          );
-        case 'emphasis':
-          return <Text key={index} style={[baseTextStyle, { fontStyle: 'italic' }]}>{renderAST(node.children)}</Text>;
-        case 'strikethrough':
-          return (
-            <Text key={index} style={[baseTextStyle, { textDecorationLine: 'line-through' }]}>
-              {renderAST(node.children)}
-            </Text>
-          );
-        case 'code_inline':
-          return (
-            <Text
-              key={index}
-              style={[
-                baseTextStyle,
-                {
-                  fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-                  backgroundColor: 'rgba(0,0,0,0.1)',
-                  paddingHorizontal: 4,
-                  borderRadius: 3
-                }
-              ]}
-            >
-              {node.content}
-            </Text>
-          );
-        case 'link':
-          return (
-            <Text
-              key={index}
-              style={[
-                baseTextStyle,
-                {
-                  color: '#007AFF',
-                  textDecorationLine: 'underline'
-                }
-              ]}
-            >
-              {renderAST(node.children)}
-            </Text>
-          );
-        case 'code_block':
-          return (
-            <View key={index} style={{ marginVertical: 8 }}>
+            );
+          }
+          case 'list_item':
+            return (
               <View
+                key={index}
                 style={{
-                  backgroundColor: 'rgba(0,0,0,0.05)',
-                  borderRadius: 6,
-                  
-                  borderLeftWidth: 3,
-                  borderLeftColor: '#007AFF'
+                  flexDirection: 'row',
+                  alignItems: 'flex-start',
+                  marginLeft: (node.metadata?.depth || 1) * 12,
+                  marginVertical: 2,
                 }}
               >
-                {node.metadata?.language && node.metadata.language.toLowerCase() === 'markdown' ? (
-                  <Text
-                    style={[
-                      unicodeStyle,
-                      {
-                        fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-                        fontSize: baseFontSize * 0.9,
-                        lineHeight: baseLineHeight
-                      }
-                    ]}
-                  >
-                    {node.content}
-                  </Text>
-                ) : (
-                  <GHScrollView
-                    horizontal
-                    bounces={false}
-                    showsHorizontalScrollIndicator
-                    nestedScrollEnabled
-                    directionalLockEnabled
-                    keyboardShouldPersistTaps="handled"
-                    onStartShouldSetResponderCapture={() => true}
-                    onMoveShouldSetResponderCapture={() => true}
-                    style={{ maxWidth: '100%', flexGrow: 0, flexShrink: 0 }}
-                    contentContainerStyle={{ flexGrow: 0, paddingBottom: 12, paddingLeft: 12, paddingTop: 9, paddingRight: 6 }}
-                    scrollEventThrottle={16}
-                  >
-                    <HorizontalCodeBlock
-                      content={String(node.content)}
-                      baseFontSize={baseFontSize}
-                      baseLineHeight={baseLineHeight}
-                      unicodeStyle={unicodeStyle}
-                    />
-                  </GHScrollView>
-                )}
+                <Text style={[inheritedTextStyle, { width: 18 }]}>
+                  {node.metadata?.ordered ? `${node.metadata.number ?? ''}.` : '•'}
+                </Text>
+                <Text style={[inheritedTextStyle, { flexShrink: 1 }]}>
+                  {renderNodes(node.children, inheritedTextStyle)}
+                </Text>
               </View>
-            </View>
-          );
-        case 'document':
-          return (
-            <View key={index} style={style}>
-              {renderAST(node.children)}
-            </View>
-          );
-        case 'blockquote':
-          return (
-            <View key={index} style={{ borderLeftWidth: 3, borderLeftColor: '#C7C7CC', paddingLeft: 10, marginVertical: 6 }}>
-              <Text style={[style, { color: '#333' }]}>
-                {renderAST(node.children)}
+            );
+          case 'text':
+            return (
+              <Text key={index} style={inheritedTextStyle}>
+                {node.content}
               </Text>
-            </View>
-          );
-        case 'hr':
-          return <View key={index} style={{ height: StyleSheet.hairlineWidth, backgroundColor: '#C7C7CC', marginVertical: 8 }} />;
-        default:
-          node satisfies never;
-      }
-    });
+            );
+          case 'strong':
+            return (
+              <Text key={index} style={[inheritedTextStyle, { fontWeight: 'bold', fontStyle: 'normal' }]}>
+                {renderNodes(node.children, inheritedTextStyle)}
+              </Text>
+            );
+          case 'strong_emphasis':
+            return (
+              <Text key={index} style={[inheritedTextStyle, { fontWeight: 'bold', fontStyle: 'italic' }]}>
+                {renderNodes(node.children, inheritedTextStyle)}
+              </Text>
+            );
+          case 'emphasis':
+            return (
+              <Text key={index} style={[inheritedTextStyle, { fontStyle: 'italic' }]}>
+                {renderNodes(node.children, inheritedTextStyle)}
+              </Text>
+            );
+          case 'strikethrough':
+            return (
+              <Text key={index} style={[inheritedTextStyle, { textDecorationLine: 'line-through' }]}>
+                {renderNodes(node.children, inheritedTextStyle)}
+              </Text>
+            );
+          case 'code_inline':
+            return (
+              <Text
+                key={index}
+                style={[
+                  inheritedTextStyle,
+                  {
+                    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                    backgroundColor: 'rgba(0,0,0,0.1)',
+                    paddingHorizontal: 4,
+                    borderRadius: 3,
+                  },
+                ]}
+              >
+                {node.content}
+              </Text>
+            );
+          case 'link':
+            return (
+              <Text
+                key={index}
+                style={[
+                  inheritedTextStyle,
+                  {
+                    color: '#007AFF',
+                    textDecorationLine: 'underline',
+                  },
+                ]}
+              >
+                {renderNodes(node.children, inheritedTextStyle)}
+              </Text>
+            );
+          case 'code_block':
+            return (
+              <View key={index} style={{ marginVertical: 8 }}>
+                <View
+                  style={{
+                    backgroundColor: 'rgba(0,0,0,0.05)',
+                    borderRadius: 6,
+                    borderLeftWidth: 3,
+                    borderLeftColor: '#007AFF',
+                  }}
+                >
+                  {node.metadata?.language && node.metadata.language.toLowerCase() === 'markdown' ? (
+                    <Text
+                      style={[
+                        unicodeStyle,
+                        {
+                          fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                          fontSize: baseFontSize * 0.9,
+                          lineHeight: baseLineHeight,
+                        },
+                      ]}
+                    >
+                      {node.content}
+                    </Text>
+                  ) : (
+                    <GHScrollView
+                      horizontal
+                      bounces={false}
+                      showsHorizontalScrollIndicator
+                      nestedScrollEnabled
+                      directionalLockEnabled
+                      keyboardShouldPersistTaps="handled"
+                      onStartShouldSetResponderCapture={() => true}
+                      onMoveShouldSetResponderCapture={() => true}
+                      style={{ maxWidth: '100%', flexGrow: 0, flexShrink: 0 }}
+                      contentContainerStyle={{ flexGrow: 0, paddingBottom: 12, paddingLeft: 12, paddingTop: 9, paddingRight: 6 }}
+                      scrollEventThrottle={16}
+                    >
+                      <HorizontalCodeBlock
+                        content={String(node.content)}
+                        baseFontSize={baseFontSize}
+                        baseLineHeight={baseLineHeight}
+                        unicodeStyle={unicodeStyle}
+                      />
+                    </GHScrollView>
+                  )}
+                </View>
+              </View>
+            );
+          case 'document':
+            return (
+              <View key={index} style={style}>
+                {renderNodes(node.children, inheritedTextStyle)}
+              </View>
+            );
+          case 'blockquote':
+            return (
+              <View key={index} style={{ borderLeftWidth: 3, borderLeftColor: '#C7C7CC', paddingLeft: 10, marginVertical: 6 }}>
+                <Text style={[style, { color: '#333' }]}>
+                  {renderNodes(node.children, inheritedTextStyle)}
+                </Text>
+              </View>
+            );
+          case 'hr':
+            return <View key={index} style={{ height: StyleSheet.hairlineWidth, backgroundColor: '#C7C7CC', marginVertical: 8 }} />;
+          default:
+            node satisfies never;
+        }
+      });
+    };
+
+    return renderNodes(ast, baseTextStyle);
   }, [style]);
 
 
@@ -456,7 +490,10 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
 
   const toggleSidebar = () => {
     Keyboard.dismiss();
-    setIsSidebarVisible(prev => !prev);
+    setIsSidebarVisible(prev => {
+      Haptics.selection();
+      return !prev;
+    });
   };
   const hideSidebar = () => setIsSidebarVisible(false);
 
@@ -466,6 +503,7 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   };
 
   const handleModelSelection = () => {
+    Haptics.selection();
     setIsModelModalVisible(true);
   };
 
@@ -519,6 +557,7 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   // Inverted list keeps bottom anchored; no manual auto-scroll needed
 
   const handleNewChat = () => {
+    Haptics.selection();
     actions.createNewThread();
   };
 
@@ -542,6 +581,7 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
     // No need to check for currentThreadId - it will be created automatically when sending first message
 
     const message = inputText.trim();
+    Haptics.impactLight();
     setInputText('');
     setIsTyping(true);
 
@@ -570,12 +610,14 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
 
 
   const handleLongPressMessage = (message: Message) => {
+    Haptics.selection();
     setContextMenu({ visible: true, message });
   };
 
   const handleCopyMessage = () => {
     if (contextMenu.message) {
       Clipboard.setString(contextMenu.message.content);
+      Haptics.success();
       setContextMenu({ visible: false, message: null });
     }
   };
@@ -629,7 +671,10 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
       {!state.apiKey && (
         <TouchableOpacity
           style={styles.setupButton}
-          onPress={() => navigation.navigate('Settings')}
+          onPress={() => {
+            Haptics.selection();
+            navigation.navigate('Settings');
+          }}
         >
           <Text style={styles.setupButtonText}>Setup API Key</Text>
         </TouchableOpacity>

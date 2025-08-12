@@ -579,6 +579,23 @@ exports[`MarkdownParser (AST snapshots) empty document 1`] = `
 }
 `;
 
+exports[`MarkdownParser (AST snapshots) escaped asterisks render as literal text 1`] = `
+{
+  "children": [
+    {
+      "children": [
+        {
+          "content": "*This text is not italic because the asterisks are escaped.*",
+          "type": "text",
+        },
+      ],
+      "type": "paragraph",
+    },
+  ],
+  "type": "document",
+}
+`;
+
 exports[`MarkdownParser (AST snapshots) fenced code block 1`] = `
 {
   "children": [

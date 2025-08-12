@@ -56,13 +56,56 @@ export class MarkdownTokenizer {
   private digitBuffer = '';
   private specialBuffer = '';
   private hashRun = 0;
+  // Track consecutive backslashes. Pairs become one literal backslash; an odd
+  // trailing backslash escapes the following special character.
+  private pendingBackslashes = 0;
 
   accept(char: string): Token[] {
     this.position++;
     const tokens: Token[] = [];
-    
+
+    // Handle backslashes and escaping (count consecutive backslashes)
+    if (char === '\\') {
+      // Flush pending hash sequence or special buffer before handling escape state
+      if (this.hashRun > 0) {
+        tokens.push({ type: TokenType.HASH_SEQUENCE, content: '#'.repeat(this.hashRun), position: this.position - this.hashRun - 1 });
+        this.hashRun = 0;
+      }
+      if (this.specialBuffer.length > 0) {
+        this.emitSpecialBuffer(tokens);
+        this.specialBuffer = '';
+      }
+      this.pendingBackslashes += 1;
+      return tokens;
+    }
+
     const isDigit = char >= '0' && char <= '9';
-    const isSpecial = this.isSpecialChar(char);
+    let isSpecial = this.isSpecialChar(char);
+
+    // If we have pending backslashes, resolve them now based on the next char
+    if (this.pendingBackslashes > 0) {
+      const isSpec = isSpecial;
+      if (isSpec) {
+        // Pairs become literal backslashes; odd one escapes the special (no extra backslash)
+        const pairs = Math.floor(this.pendingBackslashes / 2);
+        if (pairs > 0) this.charBuffer += '\\'.repeat(pairs);
+        if (this.pendingBackslashes % 2 === 1) {
+          // Escape the special char into text
+          if (this.digitBuffer.length > 0) { tokens.push(this.createDigitSequenceToken(this.digitBuffer)); this.digitBuffer = ''; }
+          this.charBuffer += char;
+          this.pendingBackslashes = 0;
+          return tokens;
+        }
+        // Even count: no escaping; fall through to handle current special normally
+        this.pendingBackslashes = 0;
+      } else {
+        // Before a non-special, pairs collapse and a leftover odd is a literal backslash as well
+        const toEmit = Math.ceil(this.pendingBackslashes / 2);
+        if (toEmit > 0) this.charBuffer += '\\'.repeat(toEmit);
+        this.pendingBackslashes = 0;
+        // continue processing current non-special char normally below
+      }
+    }
     
     // Flush buffers when transitioning between different token types
     if (this.digitBuffer.length > 0 && !isDigit) {
@@ -127,6 +170,13 @@ export class MarkdownTokenizer {
       this.digitBuffer = '';
     }
     
+    // Resolve any trailing backslashes at EOF
+    if (this.pendingBackslashes > 0) {
+      const toEmit = Math.ceil(this.pendingBackslashes / 2);
+      if (toEmit > 0) this.charBuffer += '\\'.repeat(toEmit);
+      this.pendingBackslashes = 0;
+    }
+
     // Emit any buffered special chars
     if (this.hashRun > 0) { tokens.push({ type: TokenType.HASH_SEQUENCE, content: '#'.repeat(this.hashRun), position: this.position - this.hashRun }); this.hashRun = 0; }
     if (this.specialBuffer.length > 0) { this.emitSpecialBuffer(tokens); this.specialBuffer = ''; }
@@ -193,6 +243,7 @@ export class MarkdownTokenizer {
     this.digitBuffer = '';
     this.specialBuffer = '';
     this.hashRun = 0;
+    this.pendingBackslashes = 0;
   }
 
   /**
@@ -201,7 +252,8 @@ export class MarkdownTokenizer {
    * and special characters that have not yet formed a complete token.
    */
   getBufferedChars(): string {
-    return this.charBuffer + this.digitBuffer + this.specialBuffer;
+    const pending = this.pendingBackslashes > 0 ? '\\'.repeat(this.pendingBackslashes) : '';
+    return this.charBuffer + this.digitBuffer + this.specialBuffer + pending;
   }
   
   private isSpecialChar(char: string): boolean {

@@ -12,6 +12,81 @@ describe('SimpleMarkdownTokenizer', () => {
     tokenizer = new MarkdownTokenizer();
   });
 
+  describe('Backslash escaping and special character interactions', () => {
+    test('backslash before non-special is ordinary backslash: "C:\\Program" -> single TEXT', () => {
+      const text = String.raw`C:\Program`;
+      const tokens: any[] = [];
+      for (const ch of text) tokens.push(...tokenizer.accept(ch));
+      tokens.push(...tokenizer.flush());
+      expect(tokens[0].type).toBe(TokenType.TEXT);
+      expect(tokens[0].content).toBe(String.raw`C:\Program`);
+      expect(tokens).toHaveLength(2); // TEXT + EOF
+    });
+
+    test('two adjacent backslashes collapse to one ordinary backslash: tokenized same as single', () => {
+      const text1 = String.raw`C:\Program`;
+      const text2 = String.raw`C:\\Program`;
+      const toks1: any[] = []; const toks2: any[] = [];
+      for (const ch of text1) toks1.push(...tokenizer.accept(ch));
+      toks1.push(...tokenizer.flush());
+      tokenizer.reset();
+      for (const ch of text2) toks2.push(...tokenizer.accept(ch));
+      toks2.push(...tokenizer.flush());
+      const content1 = toks1.filter((t: any) => t.type !== TokenType.EOF).map((t: any) => t.content).join('');
+      const content2 = toks2.filter((t: any) => t.type !== TokenType.EOF).map((t: any) => t.content).join('');
+      expect(content1).toBe(String.raw`C:\Program`);
+      expect(content2).toBe(String.raw`C:\Program`);
+    });
+
+    test('\\\\\\* tokenizes to \\* text (pair -> \\ then escape next special *)', () => {
+      const text = String.raw`\\\*`; // literal: \\*
+      const tokens: any[] = [];
+      for (const ch of text) tokens.push(...tokenizer.accept(ch));
+      tokens.push(...tokenizer.flush());
+      const reconstructed = tokens.filter((t: any) => t.type !== TokenType.EOF).map((t: any) => t.content).join('');
+      expect(reconstructed).toBe(String.raw`\*`);
+      // Ensure no ASTERISK token was emitted
+      expect(tokens.some((t: any) => t.type === TokenType.ASTERISK || t.type === TokenType.DOUBLE_ASTERISK)).toBe(false);
+    });
+
+    test('\\\\ tokenizes to \\ text (two pairs)', () => {
+      const text = String.raw`\\\\`; // literal: \\\\
+      const tokens: any[] = [];
+      for (const ch of text) tokens.push(...tokenizer.accept(ch));
+      tokens.push(...tokenizer.flush());
+      const reconstructed = tokens.filter((t: any) => t.type !== TokenType.EOF).map((t: any) => t.content).join('');
+      expect(reconstructed).toBe(String.raw`\\`);
+    });
+
+    test('\\\\f tokenizes to \\f text (pair -> \\ then non-special f)', () => {
+      const text = String.raw`\\f`; // literal: \\f
+      const tokens: any[] = [];
+      for (const ch of text) tokens.push(...tokenizer.accept(ch));
+      tokens.push(...tokenizer.flush());
+      const reconstructed = tokens.filter((t: any) => t.type !== TokenType.EOF).map((t: any) => t.content).join('');
+      expect(reconstructed).toBe(String.raw`\f`);
+    });
+
+    test('backslash escapes other special characters too', () => {
+      const cases = [
+        { input: String.raw`\_italic\_`, expected: String.raw`_italic_` },
+        { input: "\\`code\\`", expected: "`code`" },
+        { input: String.raw`\# not heading`, expected: String.raw`# not heading` },
+        { input: String.raw`\~strike\~`, expected: String.raw`~strike~` },
+        { input: String.raw`\[link\](url)`, expected: String.raw`[link](url)` },
+        { input: String.raw`\(paren\)`, expected: String.raw`(paren)` },
+      ];
+      for (const { input, expected } of cases) {
+        tokenizer.reset();
+        const tokens: any[] = [];
+        for (const ch of input) tokens.push(...tokenizer.accept(ch));
+        tokens.push(...tokenizer.flush());
+        const reconstructed = tokens.filter((t: any) => t.type !== TokenType.EOF).map((t: any) => t.content).join('');
+        expect(reconstructed).toBe(expected);
+      }
+    });
+  });
+
   describe('Basic tokenization', () => {
     test('should tokenize simple text', () => {
       const text = 'hello world';
@@ -29,6 +104,24 @@ describe('SimpleMarkdownTokenizer', () => {
       expect(tokens[2].type).toBe(TokenType.TEXT);
       expect(tokens[2].content).toBe('world');
       expect(tokens[3].type).toBe(TokenType.EOF);
+    });
+
+    test('should treat escaped asterisks as literal text', () => {
+      const text = String.raw`\*This text is not italic because the asterisks are escaped.\*`;
+      const tokens: any[] = [];
+      for (const char of text) tokens.push(...tokenizer.accept(char));
+      tokens.push(...tokenizer.flush());
+
+      // Ensure no ASTERISK tokens were emitted; the asterisks should be part of text
+      expect(tokens.some((t: any) => t.type === TokenType.ASTERISK || t.type === TokenType.DOUBLE_ASTERISK)).toBe(false);
+      // Reconstruct original content from tokens (excluding EOF) and ensure it matches
+      const reconstructed = tokens
+        .filter((t: any) => t.type !== TokenType.EOF)
+        .map((t: any) => t.content)
+        .join('');
+      expect(reconstructed).toBe(String.raw`*This text is not italic because the asterisks are escaped.*`);
+      // EOF must be present as the last token
+      expect(tokens[tokens.length - 1].type).toBe(TokenType.EOF);
     });
 
     test('should tokenize emphasis characters', () => {

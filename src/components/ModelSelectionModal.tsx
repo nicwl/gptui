@@ -8,6 +8,7 @@ import {
   Animated,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Haptics from '../utils/Haptics';
 
 interface ModelSelectionModalProps {
   visible: boolean;
@@ -56,6 +57,7 @@ const ModelSelectionModal: React.FC<ModelSelectionModalProps> = ({
 
   useEffect(() => {
     if (visible) {
+      Haptics.selection();
       // Show modal immediately when we want to open it
       setModalVisible(true);
       
@@ -100,6 +102,7 @@ const ModelSelectionModal: React.FC<ModelSelectionModalProps> = ({
   }, [visible, backdropOpacity, slideAnim]);
 
   const handleSelectModel = (modelId: string) => {
+    Haptics.selection();
     onSelectModel(modelId);
     onClose();
   };
@@ -115,7 +118,10 @@ const ModelSelectionModal: React.FC<ModelSelectionModalProps> = ({
         <Animated.View style={[styles.backdrop, { opacity: backdropOpacity }]}>
           <TouchableOpacity
             style={styles.backdropTouchable}
-            onPress={onClose}
+            onPress={() => {
+              Haptics.selection();
+              onClose();
+            }}
             activeOpacity={1}
           />
         </Animated.View>
@@ -130,7 +136,13 @@ const ModelSelectionModal: React.FC<ModelSelectionModalProps> = ({
         >
           <View style={styles.header}>
             <Text style={styles.title}>Select Model</Text>
-            <TouchableOpacity onPress={onClose} style={styles.closeButton}>
+            <TouchableOpacity
+              onPress={() => {
+                Haptics.selection();
+                onClose();
+              }}
+              style={styles.closeButton}
+            >
               <Text style={styles.closeButtonText}>✕</Text>
             </TouchableOpacity>
           </View>

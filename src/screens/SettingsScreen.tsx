@@ -13,6 +13,7 @@ import { StackNavigationProp } from '@react-navigation/stack';
 import { useApp } from '../context/AppContext';
 import { NavigationParams } from '../types';
 import { SecureStorage } from '../services/SecureStorage';
+import Haptics from '../utils/Haptics';
 
 type SettingsNavigationProp = StackNavigationProp<NavigationParams, 'Settings'>;
 
@@ -53,11 +54,13 @@ const SettingsScreen: React.FC<Props> = ({ navigation }) => {
       return;
     }
 
+    Haptics.selection();
     setIsSaving(true);
     try {
       await actions.setApiKey(apiKey.trim());
       setIsEditing(false);
       Alert.alert('Success', 'API key saved successfully');
+      Haptics.success();
     } catch (error) {
       Alert.alert('Error', 'Failed to save API key');
     } finally {
@@ -75,6 +78,7 @@ const SettingsScreen: React.FC<Props> = ({ navigation }) => {
           text: 'Remove',
           style: 'destructive',
           onPress: async () => {
+            Haptics.selection();
             try {
               await SecureStorage.removeApiKey();
               setApiKey('');
@@ -82,6 +86,7 @@ const SettingsScreen: React.FC<Props> = ({ navigation }) => {
               // Update app state
               await actions.setApiKey('');
               Alert.alert('Success', 'API key removed');
+              Haptics.success();
             } catch (error) {
               Alert.alert('Error', 'Failed to remove API key');
             }
@@ -101,10 +106,12 @@ const SettingsScreen: React.FC<Props> = ({ navigation }) => {
           text: 'Clear All',
           style: 'destructive',
           onPress: async () => {
+            Haptics.selection();
             try {
               await threadService.clearAllThreads();
               await actions.loadThreads();
               Alert.alert('Success', 'All conversation history cleared');
+              Haptics.success();
               navigation.navigate('Chat', {});
             } catch (error) {
               Alert.alert('Error', 'Failed to clear data');

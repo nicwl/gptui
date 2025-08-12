@@ -170,46 +170,47 @@ export class StreamingMarkdownProcessor {
   private createTentativeASTWithContent(ast: MarkdownASTNode, extraContent: string): MarkdownASTNode {
     // If it's a text node, create a copy with the extra content
     if (ast.type === 'text') {
-      return {
-        ...ast,
-        content: ast.content + extraContent
-      };
-    }
-    
-    // If it's a content node (but not text), wrap it
-    if (ast.type === 'code_block' || ast.type === 'code_inline') {
-      // For content nodes, we need to create a proper container
-      return {
-        type: 'document',
-        children: [{
-          type: 'text',
-          content: ast.content + extraContent
-        }]
-      } satisfies MarkdownASTNode;
+      return { ...ast, content: ast.content + extraContent };
     }
 
-    // Now we know it's a container node
-    if (ast.children.length === 0) {
-      return {
-        ...ast,
-        children: [{
-          type: 'text',
-          content: extraContent
-        }]
-      } satisfies MarkdownASTNode;
+    // If this node has children, operate within its children array
+    if (hasChildren(ast)) {
+      if (ast.children.length === 0) {
+        return {
+          ...ast,
+          children: [{ type: 'text', content: extraContent }]
+        } satisfies MarkdownASTNode;
+      }
+
+      const children = [...ast.children];
+      const lastChild = children[children.length - 1];
+
+      if (hasChildren(lastChild)) {
+        // Recurse into the rightmost branch
+        children[children.length - 1] = this.createTentativeASTWithContent(lastChild, extraContent);
+      } else if (hasContent(lastChild)) {
+        if (lastChild.type === 'text') {
+          children[children.length - 1] = { ...lastChild, content: lastChild.content + extraContent } as MarkdownASTNode;
+        } else {
+          // Leaf content nodes (code_block/code_inline). Append a text sibling after them.
+          children.push({ type: 'text', content: extraContent });
+        }
+      } else {
+        // Leaf without children or content (e.g., hr). Append a text sibling.
+        children.push({ type: 'text', content: extraContent });
+      }
+
+      return { ...ast, children } as MarkdownASTNode;
     }
 
-    // Find the rightmost child and create tentative version
-    const children = [...ast.children];
-    const lastChild = children[children.length - 1];
-    
-    // Recursively handle the last child
-    children[children.length - 1] = this.createTentativeASTWithContent(lastChild, extraContent);
-    
-    return {
-      ...ast,
-      children
-    } satisfies MarkdownASTNode;
+    // Leaf nodes without children
+    if (hasContent(ast)) {
+      // ast is 'code_block' | 'code_inline' here because 'text' is handled above
+      return { type: 'document', children: [ast, { type: 'text', content: extraContent }] } as MarkdownASTNode;
+    }
+
+    // Fallback for nodes like hr: wrap and append tentative text
+    return { type: 'document', children: [ast, { type: 'text', content: extraContent }] } as MarkdownASTNode;
   }
 
   /**
