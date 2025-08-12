@@ -39,42 +39,25 @@ const HorizontalCodeBlock: React.FC<{
   const lines = React.useMemo(() => String(content).split('\n'), [content]);
 
   return (
-    <View style={{ width: '100%', alignSelf: 'stretch' }}>
-      <GHScrollView
-        horizontal
-        bounces={false}
-        showsHorizontalScrollIndicator
-        nestedScrollEnabled
-        directionalLockEnabled
-        keyboardShouldPersistTaps="handled"
-        onStartShouldSetResponderCapture={() => true}
-        onMoveShouldSetResponderCapture={() => true}
-        style={{ maxWidth: '100%', flexGrow: 0, flexShrink: 0 }}
-        contentContainerStyle={{ flexGrow: 0, paddingBottom: 0 }}
-        scrollEventThrottle={16}
-        //scrollIndicatorInsets={Platform.OS === 'ios' ? { bottom: 8 } : undefined as any}
-      >
-        <View style={{ flexDirection: 'column', alignSelf: 'flex-start', width: maxLineWidth > 0 ? maxLineWidth : undefined }}>
-          {lines.map((ln, i) => (
-            <Text
-              key={i}
-              numberOfLines={1}
-              onLayout={onLineLayout}
-              style={[
-                unicodeStyle,
-                {
-                  fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-                  fontSize: baseFontSize * 0.9,
-                  lineHeight: baseLineHeight,
-                  includeFontPadding: false
-                }
-              ]}
-            >
-              {ln.length === 0 ? ' ' : ln}
-            </Text>
-          ))}
-        </View>
-      </GHScrollView>
+    <View style={{ flexDirection: 'column', alignSelf: 'flex-start', width: maxLineWidth > 0 ? maxLineWidth : undefined }}>
+      {lines.map((ln, i) => (
+        <Text
+          key={i}
+          numberOfLines={1}
+          onLayout={onLineLayout}
+          style={[
+            unicodeStyle,
+            {
+              fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+              fontSize: baseFontSize * 0.9,
+              lineHeight: baseLineHeight,
+              includeFontPadding: false
+            }
+          ]}
+        >
+          {ln.length === 0 ? ' ' : ln}
+        </Text>
+      ))}
     </View>
   );
 };
@@ -369,30 +352,26 @@ const StreamingText = ({ content, isStreaming, style, isAssistant, messageId }: 
                     {node.content}
                   </Text>
                 ) : (
-                  <View style={{ width: '100%', alignSelf: 'stretch' }}>
-                    <GHScrollView
-                      horizontal
-                      bounces={false}
-                      showsHorizontalScrollIndicator
-                      nestedScrollEnabled
-                      directionalLockEnabled
-                      keyboardShouldPersistTaps="handled"
-                      onStartShouldSetResponderCapture={() => true}
-                      onMoveShouldSetResponderCapture={() => true}
-                      style={{ maxWidth: '100%', flexGrow: 0, flexShrink: 0 }}
-                      contentContainerStyle={{ flexGrow: 0, paddingBottom: 12,paddingLeft: 12,
-                        paddingTop: 6,
-                        paddingRight: 6, }}
-                      scrollEventThrottle={16}
-                    >
-                      <HorizontalCodeBlock
-                        content={String(node.content)}
-                        baseFontSize={baseFontSize}
-                        baseLineHeight={baseLineHeight}
-                        unicodeStyle={unicodeStyle}
-                      />
-                    </GHScrollView>
-                  </View>
+                  <GHScrollView
+                    horizontal
+                    bounces={false}
+                    showsHorizontalScrollIndicator
+                    nestedScrollEnabled
+                    directionalLockEnabled
+                    keyboardShouldPersistTaps="handled"
+                    onStartShouldSetResponderCapture={() => true}
+                    onMoveShouldSetResponderCapture={() => true}
+                    style={{ maxWidth: '100%', flexGrow: 0, flexShrink: 0 }}
+                    contentContainerStyle={{ flexGrow: 0, paddingBottom: 12, paddingLeft: 12, paddingTop: 9, paddingRight: 6 }}
+                    scrollEventThrottle={16}
+                  >
+                    <HorizontalCodeBlock
+                      content={String(node.content)}
+                      baseFontSize={baseFontSize}
+                      baseLineHeight={baseLineHeight}
+                      unicodeStyle={unicodeStyle}
+                    />
+                  </GHScrollView>
                 )}
               </View>
             </View>
