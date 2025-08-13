@@ -9,7 +9,7 @@ import React from 'react';
 import { Text, View, Platform, Image, Linking } from 'react-native';
 import { ScrollView as GHScrollView } from 'react-native-gesture-handler';
 import { parser } from '@lezer/markdown';
-import { Tree, NodeType, TreeFragment, TreeCursor } from '@lezer/common';
+import { Tree, NodeType, TreeFragment, TreeCursor, SyntaxNodeRef } from '@lezer/common';
 
 // Types for our rendered components
 export interface MarkdownStyleConfig {
@@ -75,12 +75,7 @@ export class LezerMarkdownRenderer {
    */
   render(text: string, baseStyle: any): React.ReactNode {
     const tree = this.parseIncremental(text);
-    const cursor = tree.cursor();
-    // Always render from the root cursor; the parser should not throw
-    if (cursor.name !== 'Document') {
-      return [<Text key="root-fallback" style={baseStyle}>{text}</Text>];
-    }
-    const root = this.renderNodeAtCursor(cursor, text, baseStyle, undefined);
+    const root = this.renderUsingIterate(tree, text, baseStyle);
     return [root];
   }
 
@@ -100,12 +95,21 @@ export class LezerMarkdownRenderer {
   }
 
   /**
-   * Render directly from the Lezer cursor without constructing an intermediate render tree
+   * New renderer that uses Tree.iterate enter/leave traversal instead of manual cursor loops
    */
-  private renderNodeAtCursor(cursor: TreeCursor, text: string, inheritedStyle: any, parentNodeName?: string): React.ReactNode {
-    const nodeName: string = cursor.name;
-    const nodeFrom: number = cursor.from;
-    const nodeTo: number = cursor.to;
+  private renderUsingIterate(tree: Tree, text: string, baseStyle: any): React.ReactNode {
+    type Frame = {
+      name: string;
+      from: number;
+      to: number;
+      children: React.ReactNode[];
+      lastEnd: number;
+      prevChildName: string | null;
+      styleForChildren: any;
+      parentName?: string;
+      listDepth: number;
+    };
+
     const baseFontSize = this.styleConfig.fontSize;
     const baseLineHeight = this.styleConfig.lineHeight;
     const unicodeStyle = {} as const;
@@ -123,358 +127,516 @@ export class LezerMarkdownRenderer {
       return flat;
     };
 
-    const renderChildren = (childParentName?: string, childStyle?: any): React.ReactNode[] => {
-      const elements: React.ReactNode[] = [];
-      const c = cursor.node.cursor();
-      const parentFrom = nodeFrom;
-      const parentTo = nodeTo;
-      let lastEnd = parentFrom;
-      let prevChildName: string | null = null;
-      const normalizeGap = (s: string) => {
-        if (childParentName === 'Paragraph') return s.replace(/\n/g, ' ');
-        if (
-          childParentName === 'BulletList' ||
-          childParentName === 'OrderedList' ||
-          childParentName === 'Document'
-        ) return '';
-        if (
-          (childParentName && childParentName.startsWith('ATXHeading')) ||
-          childParentName === 'SetextHeading1' ||
-          childParentName === 'SetextHeading2'
-        ) {
-          // Suppress whitespace-only gaps inside headings (e.g. after '#' marks or trailing spaces)
-          return /\S/.test(s) ? s : '';
-        }
-        return s;
-      };
-      if (!c.firstChild()) return elements;
-      do {
-        if (c.from > lastEnd) {
-          let gap = text.slice(lastEnd, c.from);
-          // Special-case: inside headings, drop leading spaces immediately after the header mark
-          const isHeading = !!(childParentName && (childParentName.startsWith('ATXHeading') || childParentName === 'SetextHeading1' || childParentName === 'SetextHeading2'));
-          if (isHeading && prevChildName === 'HeaderMark') {
-            gap = gap.replace(/^\s+/, '');
-          }
-          gap = normalizeGap(gap);
-          if (gap.length > 0) {
-            elements.push(
-              <Text key={`gap-${childParentName}-${lastEnd}-${c.from}`} style={childStyle ?? inheritedStyle}>{gap}</Text>
-            );
-          }
-        }
-        const rendered = this.renderNodeAtCursor(c, text, childStyle ?? inheritedStyle, childParentName);
-        if (rendered !== null && rendered !== undefined) {
-          elements.push(
-            React.cloneElement(rendered as React.ReactElement, {
-              key: `childof-${childParentName}-${c.from}-${c.to}`,
-            })
-          );
-        }
-        prevChildName = c.name;
-        lastEnd = c.to;
-      } while (c.nextSibling());
-      if (lastEnd < parentTo) {
-        const trailing = normalizeGap(text.slice(lastEnd, parentTo));
-        if (trailing.length > 0) {
-          elements.push(
-            <Text key={`trail-${childParentName}-${lastEnd}-${parentTo}`} style={childStyle ?? inheritedStyle}>{trailing}</Text>
-          );
-        }
+    const normalizeGapForParent = (parentName: string | undefined, prevChildName: string | null, s: string) => {
+      if (!s) return s;
+          if (parentName === 'Paragraph') return s.replace(/\n/g, ' ');
+      if (parentName === 'BulletList' || parentName === 'OrderedList' || parentName === 'Document' || parentName === 'ListItem') return '';
+      if (
+        parentName && (
+          parentName.startsWith('ATXHeading') ||
+          parentName === 'SetextHeading1' ||
+          parentName === 'SetextHeading2'
+        )
+      ) {
+        // Drop whitespace-only gaps in headings
+        let out = /\S/.test(s) ? s : '';
+        // Also drop leading spaces right after header mark
+        if (prevChildName === 'HeaderMark') out = out.replace(/^\s+/, '');
+        return out;
       }
-      return elements.filter(Boolean);
+      return s;
     };
 
-    switch (nodeName) {
-      case 'Document':
-        return <View style={inheritedStyle}>{renderChildren('Document')}</View>;
-
-      case 'Paragraph': {
-        // Render children and decide container based on whether they include non-Text elements
-        const childrenEls = renderChildren('Paragraph', inheritedStyle);
-        if (!childrenEls || childrenEls.length === 0) {
-          // No inline children: render full paragraph content directly
-          let content = text.slice(nodeFrom, nodeTo);
-          content = content.replace(/\n/g, ' ');
-          const pStyle = normalizeTextStyle([inheritedStyle, { marginVertical: 4 }]);
-          return <Text style={pStyle}>{content}</Text>;
+    const pushGap = (parent: Frame | undefined, nextFrom: number) => {
+      if (!parent) return;
+      if (nextFrom > parent.lastEnd) {
+        let gap = text.slice(parent.lastEnd, nextFrom);
+        gap = normalizeGapForParent(parent.name, parent.prevChildName, gap);
+        if (gap.length > 0) {
+          // Push raw string to keep inline text simple
+          parent.children.push(gap);
         }
-        const containsNonText = childrenEls.some((el: any) => {
-          if (!el || !('type' in el)) return false;
-          const t = (el as any).type;
-          const isText = t === Text || (typeof t === 'string' && String(t).toLowerCase() === 'text');
-          return !isText;
-        });
-        if (containsNonText) {
-          // Use a View to allow non-Text children (e.g., Image) inside the paragraph
-          return <View style={{ marginVertical: 4 }}>{childrenEls}</View>;
+      }
+    };
+
+    const flattenText = (el: any): string => {
+      if (el == null) return '';
+      if (typeof el === 'string') return el;
+      if (typeof el === 'number') return String(el);
+      const ch = el.props?.children;
+      if (typeof ch === 'string') return ch;
+      if (Array.isArray(ch)) return ch.map(flattenText).join('');
+      return flattenText(ch);
+    };
+
+    const getHeadingLevel = (nodeName: string): number => this.getHeadingLevel(nodeName);
+
+    const getCodeLanguageFromNode = (node: SyntaxNodeRef): string | undefined => {
+      const info = node.node.getChild('CodeInfo');
+      if (info) return text.slice(info.from, info.to).trim();
+      return undefined;
+    };
+
+    const getCodeBlockContentFromNode = (node: SyntaxNodeRef): string => {
+      const ct = node.node.getChild('CodeText');
+      if (ct) return text.slice(ct.from, ct.to);
+      return text.slice(node.from, node.to);
+    };
+
+    const getInlineCodeContentFromNode = (node: SyntaxNodeRef): string => {
+      const segment = text.slice(node.from, node.to);
+      return segment.replace(/^`+/, '').replace(/`+$/, '');
+    };
+
+    const getLinkUrlFromNode = (node: SyntaxNodeRef): string => {
+      const urlNode = node.node.getChild('URL');
+      if (urlNode) return text.slice(urlNode.from, urlNode.to);
+      return '#';
+    };
+
+    const getImageAltFromNode = (node: SyntaxNodeRef): string | undefined => {
+      const segment = text.slice(node.from, node.to);
+      const m = segment.match(/!\[(.*?)\]/);
+      const alt = m ? m[1].trim() : '';
+      return alt.length > 0 ? alt : undefined;
+    };
+
+    const getImageUrlFromNode = (node: SyntaxNodeRef): string => {
+      const urlNode = node.node.getChild('URL');
+      if (urlNode) return text.slice(urlNode.from, urlNode.to).trim();
+      const segment = text.slice(node.from, node.to);
+      const m = segment.match(/\(([^)]+)\)/);
+      return (m ? m[1].trim() : '#');
+    };
+
+    const extractListItemNumberFromNode = (node: SyntaxNodeRef): number => {
+      const listMark = node.node.getChild('ListMark');
+      if (listMark) {
+        const mark = text.slice(listMark.from, listMark.to);
+        const m = mark.match(/^(\d+)\./);
+        if (m) return parseInt(m[1], 10);
+      }
+      return 1;
+    };
+
+    const IGNORED = new Set([
+      'EmphasisMark',
+      'CodeMark',
+      'LinkMark',
+      'ImageMark',
+      'HeaderMark',
+      'ListMark',
+      'CodeInfo',
+      'QuoteMark',
+      'URL',
+    ]);
+
+    const stack: Frame[] = [];
+    let root: React.ReactNode | null = null;
+
+    tree.iterate({
+      enter: (node: SyntaxNodeRef) => {
+        const parent = stack[stack.length - 1];
+        // Push gap before this node under its parent
+        pushGap(parent, node.from);
+
+        const name = node.name;
+
+        // Ignored structural/mark nodes
+        if (IGNORED.has(name)) {
+          if (parent) {
+            parent.prevChildName = name;
+            parent.lastEnd = Math.max(parent.lastEnd, node.to);
+          }
+          return false;
         }
-        // Only Text children → safe to wrap with Text
-        const pStyle = normalizeTextStyle([inheritedStyle, { marginVertical: 4 }]);
-        return <Text style={pStyle}>{childrenEls}</Text>;
-      }
 
-      case 'ATXHeading1':
-      case 'ATXHeading2':
-      case 'ATXHeading3':
-      case 'ATXHeading4':
-      case 'ATXHeading5':
-      case 'ATXHeading6':
-      case 'SetextHeading1':
-      case 'SetextHeading2': {
-        const level = this.getHeadingLevel(nodeName);
-        const headingScales = [1.6, 1.4, 1.2, 1.1, 1.05, 1.0];
-        const headingScale = headingScales[Math.max(0, Math.min(5, level - 1))];
-        const headingStyle = [
-          inheritedStyle,
-          {
-            fontSize: baseFontSize * headingScale,
-            lineHeight: Math.round(baseLineHeight * headingScale),
-            fontWeight: 'bold',
-          },
-        ];
-        return (
-          <Text style={[headingStyle, { marginVertical: 8 }]}> 
-            {renderChildren(nodeName, headingStyle)}
-          </Text>
-        );
-      }
+        // Leaf helper shortcut
+        const pushLeaf = (element: React.ReactNode) => {
+          if (!parent) return;
+          parent.children.push(
+            React.cloneElement(element as React.ReactElement, { key: `leaf-${name}-${node.from}-${node.to}` })
+          );
+          parent.prevChildName = name;
+          parent.lastEnd = Math.max(parent.lastEnd, node.to);
+        };
 
-      case 'BulletList':
-      case 'OrderedList':
-        return <View style={{ marginVertical: 6 }}>{renderChildren(nodeName, inheritedStyle)}</View>;
-
-      case 'ListItem': {
-        const isOrdered = parentNodeName === 'OrderedList';
-        const number = isOrdered ? this.extractListItemNumberFromCursor(cursor, text) : undefined;
-        // Render the content inside a side-by-side layout
-        // We need to render children but skip ListMark nodes (handled by marker)
-        const contentNodes: React.ReactNode[] = [];
-        {
-          const c = cursor.node.cursor();
-          if (c.firstChild()) {
-            do {
-              if (c.name === 'ListMark') continue;
-              const rendered = this.renderNodeAtCursor(c, text, inheritedStyle, 'ListItem');
-              if (rendered !== null && rendered !== undefined) {
-                contentNodes.push(
-                  React.cloneElement(rendered as React.ReactElement, {
-                    key: `listitem-${c.from}-${c.to}`,
-                  })
-                );
-              }
-            } while (c.nextSibling());
+        switch (name) {
+          case 'Text': {
+            const content = text.slice(node.from, node.to);
+            if (content.length > 0 && parent) {
+              parent.children.push(content);
+              parent.prevChildName = name;
+              parent.lastEnd = Math.max(parent.lastEnd, node.to);
+            } else {
+              if (parent) parent.prevChildName = name;
+            }
+            return false;
+          }
+          case 'ATXHeading1':
+          case 'ATXHeading2':
+          case 'ATXHeading3':
+          case 'ATXHeading4':
+          case 'ATXHeading5':
+          case 'ATXHeading6':
+          case 'SetextHeading1':
+          case 'SetextHeading2':
+            break;
+          case 'HardBreak': {
+            if (parent) {
+              parent.children.push('\n');
+              parent.prevChildName = name;
+              parent.lastEnd = Math.max(parent.lastEnd, node.to);
+            }
+            return false;
+          }
+          case 'SoftBreak': {
+            if (parent) {
+              parent.children.push(' ');
+              parent.prevChildName = name;
+              parent.lastEnd = Math.max(parent.lastEnd, node.to);
+            }
+            return false;
+          }
+          case 'Escape': {
+            const segment = text.slice(node.from, node.to);
+            const literal = segment.startsWith('\\') ? segment.slice(1) : segment;
+            if (parent) {
+              parent.children.push(literal);
+              parent.prevChildName = name;
+              parent.lastEnd = Math.max(parent.lastEnd, node.to);
+            }
+            return false;
+          }
+          case 'InlineCode': {
+            const inlineCodeStyle = normalizeTextStyle([
+              parent?.styleForChildren,
+              {
+                fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                backgroundColor: 'rgba(0,0,0,0.1)',
+                paddingHorizontal: 4,
+                borderRadius: 3,
+                fontSize: ((parent?.styleForChildren?.fontSize) || baseFontSize) * 0.9,
+              },
+            ]);
+            const content = getInlineCodeContentFromNode(node);
+            pushLeaf(<Text style={inlineCodeStyle}>{content}</Text>);
+            return false;
+          }
+          case 'CodeBlock':
+          case 'FencedCode': {
+            const content = getCodeBlockContentFromNode(node);
+            const language = getCodeLanguageFromNode(node);
+            const el = (
+              <View style={{ marginVertical: 8 }}>
+                <View
+                  style={{
+                    backgroundColor: 'rgba(0,0,0,0.05)',
+                    borderRadius: 6,
+                    borderLeftWidth: 3,
+                    borderLeftColor: '#007AFF',
+                  }}
+                >
+                  {language && language.toLowerCase() === 'markdown' ? (
+                    <Text
+                      style={[
+                        unicodeStyle,
+                        {
+                          fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                          fontSize: baseFontSize * 0.9,
+                          lineHeight: baseLineHeight,
+                          padding: 12,
+                        },
+                      ]}
+                    >
+                      {content}
+                    </Text>
+                  ) : (
+                    <GHScrollView
+                      horizontal
+                      bounces={false}
+                      showsHorizontalScrollIndicator
+                      nestedScrollEnabled
+                      directionalLockEnabled
+                      keyboardShouldPersistTaps="handled"
+                      onStartShouldSetResponderCapture={() => true}
+                      onMoveShouldSetResponderCapture={() => true}
+                      style={{ maxWidth: '100%', flexGrow: 0, flexShrink: 0 }}
+                      contentContainerStyle={{ flexGrow: 0, paddingBottom: 12, paddingLeft: 12, paddingTop: 9, paddingRight: 6 }}
+                      scrollEventThrottle={16}
+                    >
+                      <HorizontalCodeBlock content={content} baseFontSize={baseFontSize} baseLineHeight={baseLineHeight} unicodeStyle={unicodeStyle} />
+                    </GHScrollView>
+                  )}
+                </View>
+              </View>
+            );
+            pushLeaf(el);
+            return false;
+          }
+          case 'HTMLTag': {
+            const segment = text.slice(node.from, node.to);
+            const openMatch = segment.match(/<\s*([A-Za-z][\w-]*)[^>]*>/);
+            const tagName = openMatch ? openMatch[1] : 'html';
+            const isSelfClosing = /<[^>]*\/>\s*$/.test(segment);
+            let inner: string | null = null;
+            if (!isSelfClosing) {
+              const innerMatch = segment.match(/<[^>]*>([\s\S]*)<\/\s*([A-Za-z][\w-]*)\s*>/);
+              inner = innerMatch ? innerMatch[1] : null;
+            }
+            const elements: React.ReactNode[] = [];
+            elements.push(
+              <Text key={`htmltag-open-${node.from}`} style={normalizeTextStyle(parent?.styleForChildren)}>{`<${tagName}>`}</Text>
+            );
+            if (inner && inner.length > 0) {
+              elements.push(
+                <Text key={`htmltag-inner-${node.from}`} style={normalizeTextStyle(parent?.styleForChildren)}>{inner}</Text>
+              );
+            }
+            if (!isSelfClosing) {
+              elements.push(
+                <Text key={`htmltag-close-${node.from}`} style={normalizeTextStyle(parent?.styleForChildren)}>{`</${tagName}>`}</Text>
+              );
+            }
+            pushLeaf(<Text style={normalizeTextStyle(parent?.styleForChildren)}>{elements}</Text>);
+            return false;
+          }
+          case 'HorizontalRule': {
+            pushLeaf(<View style={{ height: 1, backgroundColor: '#C7C7CC', marginVertical: 8 }} />);
+            return false;
+          }
+          case 'Image': {
+            const altText = getImageAltFromNode(node) || 'Image';
+            const src = getImageUrlFromNode(node);
+            pushLeaf(
+              <Image
+                accessibilityLabel={altText}
+                source={{ uri: src }}
+                style={{ width: 200, height: 200, resizeMode: 'contain', marginVertical: 6 }}
+              />
+            );
+            return false;
           }
         }
-        const markerStyle = normalizeTextStyle([inheritedStyle, { width: 16, marginVertical: 4 }]);
-        return (
-          <View style={{ flexDirection: 'row', alignItems: 'flex-start', marginLeft: 12, marginVertical: 2 }}>
-            <Text style={markerStyle}>
-              {isOrdered ? `${number || '1'}.` : '•'}
-            </Text>
-            <View style={{ flex: 1 }}>{contentNodes}</View>
-          </View>
-        );
-      }
 
-      case 'CodeBlock':
-      case 'FencedCode': {
-        const content = this.getCodeBlockContentFromCursor(cursor, text);
-        const language = this.getCodeLanguageFromCursor(cursor, text);
-        return (
-          <View style={{ marginVertical: 8 }}>
-            <View
-              style={{
-                backgroundColor: 'rgba(0,0,0,0.05)',
-                borderRadius: 6,
-                borderLeftWidth: 3,
-                borderLeftColor: '#007AFF',
-              }}
-            >
-              {language && language.toLowerCase() === 'markdown' ? (
-                <Text
-                  style={[
-                    unicodeStyle,
-                    {
-                      fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-                      fontSize: baseFontSize * 0.9,
-                      lineHeight: baseLineHeight,
-                      padding: 12,
-                    },
-                  ]}
-                >
-                  {content}
-                </Text>
-              ) : (
-                <GHScrollView
-                  horizontal
-                  bounces={false}
-                  showsHorizontalScrollIndicator
-                  nestedScrollEnabled
-                  directionalLockEnabled
-                  keyboardShouldPersistTaps="handled"
-                  onStartShouldSetResponderCapture={() => true}
-                  onMoveShouldSetResponderCapture={() => true}
-                  style={{ maxWidth: '100%', flexGrow: 0, flexShrink: 0 }}
-                  contentContainerStyle={{ flexGrow: 0, paddingBottom: 12, paddingLeft: 12, paddingTop: 9, paddingRight: 6 }}
-                  scrollEventThrottle={16}
-                >
-                  <HorizontalCodeBlock content={content} baseFontSize={baseFontSize} baseLineHeight={baseLineHeight} unicodeStyle={unicodeStyle} />
-                </GHScrollView>
-              )}
-            </View>
-          </View>
-        );
-      }
-
-      case 'InlineCode':
-        const inlineCodeStyle = normalizeTextStyle([
-          inheritedStyle,
-          {
-            fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-            backgroundColor: 'rgba(0,0,0,0.1)',
-            paddingHorizontal: 4,
-            borderRadius: 3,
-            fontSize: (inheritedStyle?.fontSize || baseFontSize) * 0.9,
-          },
-        ]);
-        return (
-          <Text style={inlineCodeStyle}>
-            {this.getInlineCodeContentFromCursor(cursor, text)}
-          </Text>
-        );
-
-      case 'HardBreak':
-        // Render a newline within the current paragraph context
-        return <Text style={normalizeTextStyle(inheritedStyle)}>{'\n'}</Text>;
-
-      case 'SoftBreak':
-        // Render a space for soft line breaks
-        return <Text style={normalizeTextStyle(inheritedStyle)}>{' '}</Text>;
-
-      case 'HTMLTag': {
-        const segment = text.slice(nodeFrom, nodeTo);
-        // Extract tag name from opening tag
-        const openMatch = segment.match(/<\s*([A-Za-z][\w-]*)[^>]*>/);
-        const tagName = openMatch ? openMatch[1] : 'html';
-        const isSelfClosing = /<[^>]*\/>\s*$/.test(segment);
-        let inner: string | null = null;
-        if (!isSelfClosing) {
-          // Try to extract inner content between first opening and last closing tag
-          const innerMatch = segment.match(/<[^>]*>([\s\S]*)<\/\s*([A-Za-z][\w-]*)\s*>/);
-          inner = innerMatch ? innerMatch[1] : null;
+        // Containers: push frame
+        let styleForChildren = parent?.styleForChildren ?? baseStyle;
+        switch (name) {
+          case 'Document':
+            styleForChildren = baseStyle;
+            break;
+          case 'Paragraph':
+            // Inherit
+            break;
+          case 'Emphasis':
+            styleForChildren = [styleForChildren, { fontStyle: 'italic' }];
+            break;
+          case 'StrongEmphasis':
+            styleForChildren = [styleForChildren, { fontWeight: 'bold' }];
+            break;
+          case 'Strikethrough':
+            styleForChildren = [styleForChildren, { textDecorationLine: 'line-through' }];
+            break;
+          case 'ATXHeading1':
+          case 'ATXHeading2':
+          case 'ATXHeading3':
+          case 'ATXHeading4':
+          case 'ATXHeading5':
+          case 'ATXHeading6':
+          case 'SetextHeading1':
+          case 'SetextHeading2': {
+            const level = getHeadingLevel(name);
+            const headingScales = [1.6, 1.4, 1.2, 1.1, 1.05, 1.0];
+            const headingScale = headingScales[Math.max(0, Math.min(5, level - 1))];
+            styleForChildren = [styleForChildren, {
+              fontSize: baseFontSize * headingScale,
+              lineHeight: Math.round(baseLineHeight * headingScale),
+              fontWeight: 'bold',
+            }];
+            break;
+          }
+          case 'Link':
+            styleForChildren = [styleForChildren, { color: '#007AFF', textDecorationLine: 'underline' }];
+            break;
+          case 'Blockquote':
+            // Keep inherited; color applied at wrap time
+            break;
+          case 'BulletList':
+          case 'OrderedList':
+          case 'ListItem':
+            // Inherit
+            break;
         }
-        const elements: React.ReactNode[] = [];
-        elements.push(
-          <Text key={`htmltag-open-${nodeFrom}`} style={normalizeTextStyle(inheritedStyle)}>{`<${tagName}>`}</Text>
-        );
-        if (inner && inner.length > 0) {
-          elements.push(
-            <Text key={`htmltag-inner-${nodeFrom}`} style={normalizeTextStyle(inheritedStyle)}>{inner}</Text>
-          );
+
+        // Compute list depth based on ancestors
+        const parentListDepth = parent?.listDepth ?? 0;
+        const currentListDepth = name === 'ListItem' ? parentListDepth + 1 : parentListDepth;
+
+        stack.push({
+          name,
+          from: node.from,
+          to: node.to,
+          children: [],
+          lastEnd: node.from,
+          prevChildName: null,
+          styleForChildren,
+          parentName: parent?.name,
+          listDepth: currentListDepth,
+        });
+      },
+      leave: (node: SyntaxNodeRef) => {
+        const frame = stack.pop();
+        if (!frame) return;
+
+        // Append trailing gap within this node
+        if (frame.lastEnd < frame.to) {
+          let trailing = text.slice(frame.lastEnd, frame.to);
+          trailing = normalizeGapForParent(frame.name, frame.prevChildName, trailing);
+          if (trailing.length > 0) {
+            // Push as raw string to keep simple paragraphs as a single text node
+            frame.children.push(trailing);
+          }
         }
-        if (!isSelfClosing) {
-          elements.push(
-            <Text key={`htmltag-close-${nodeFrom}`} style={normalizeTextStyle(inheritedStyle)}>{`</${tagName}>`}</Text>
-          );
-        }
-        return <Text style={normalizeTextStyle(inheritedStyle)}>{elements}</Text>;
-      }
 
-      case 'Escape': {
-        // Render escaped character literally (drop leading backslash if present)
-        const segment = text.slice(nodeFrom, nodeTo);
-        const literal = segment.startsWith('\\') ? segment.slice(1) : segment;
-        return <Text style={normalizeTextStyle(inheritedStyle)}>{literal}</Text>;
-      }
-
-      case 'Emphasis': {
-        const styleWithItalic = [inheritedStyle, { fontStyle: 'italic' }];
-        const tStyle = normalizeTextStyle(styleWithItalic);
-        return <Text style={tStyle}>{renderChildren('Emphasis', styleWithItalic)}</Text>;
-      }
-
-      case 'StrongEmphasis': {
-        const styleWithBold = [inheritedStyle, { fontWeight: 'bold' }];
-        const tStyle = normalizeTextStyle(styleWithBold);
-        return <Text style={tStyle}>{renderChildren('StrongEmphasis', styleWithBold)}</Text>;
-      }
-
-      case 'Strikethrough': {
-        const styleWithStrike = [inheritedStyle, { textDecorationLine: 'line-through' }];
-        const tStyle = normalizeTextStyle(styleWithStrike);
-        return <Text style={tStyle}>{renderChildren('Strikethrough', styleWithStrike)}</Text>;
-      }
-
-      case 'Link': {
-        // Only render the visible link text, not the URL
-        const url = this.getLinkUrlFromCursor(cursor, text);
-        const linkText = this.getLinkTextFromCursor(cursor, text);
-        return (
-          <Text
-            style={normalizeTextStyle([inheritedStyle, { color: '#007AFF', textDecorationLine: 'underline' }])}
-            accessibilityRole="link"
-            accessibilityLabel={linkText}
-            onPress={() => {
-              if (url) {
-                try { Linking.openURL(url); } catch {}
+        // Build element for this frame
+        let built: React.ReactNode | null = null;
+        switch (frame.name) {
+          case 'Document':
+            built = <View style={[baseStyle, { flexShrink: 1, minWidth: 0 }]}>{frame.children}</View>;
+            break;
+          case 'Paragraph': {
+            if (!frame.children || frame.children.length === 0) {
+              let content = text.slice(frame.from, frame.to).replace(/\n/g, ' ');
+              const pStyle = normalizeTextStyle([frame.styleForChildren, { marginVertical: 4, flex: 1, minWidth: 0, flexShrink: 1 }]);
+              built = <Text style={pStyle}>{content}</Text>;
+              break;
+            }
+            const containsNonText = frame.children.some((el: any) => {
+              if (typeof el === 'string' || typeof el === 'number') return false;
+              if (!el || typeof el !== 'object') return false;
+              const t = (el as any).type;
+              const isText = t === Text || (typeof t === 'string' && String(t).toLowerCase() === 'text');
+              return !isText;
+            });
+            if (containsNonText) {
+              const normalizedChildren = frame.children.map((ch, i) => {
+                if (typeof ch === 'string' || typeof ch === 'number') {
+                  return <Text key={`pvseg-${i}`} style={normalizeTextStyle([frame.styleForChildren, { flexShrink: 1 }])}>{ch}</Text>;
+                }
+                return ch;
+              });
+              built = <View style={{ marginVertical: 4, width: '100%', maxWidth: '100%', alignSelf: 'stretch', flexShrink: 1 }}>{normalizedChildren}</View>;
+            } else {
+              const pStyle = normalizeTextStyle([frame.styleForChildren, { marginVertical: 4, flexShrink: 1 }]);
+              const onlyStrings = frame.children.every(ch => typeof ch === 'string');
+              if (onlyStrings && frame.children.length === 1) {
+                built = <Text style={pStyle}>{frame.children[0] as string}</Text>;
+              } else {
+                const normalizedChildren = frame.children.map((ch, i) => {
+                  if (typeof ch === 'string' || typeof ch === 'number') {
+                    return <Text key={`pseg-${i}`} style={normalizeTextStyle([frame.styleForChildren, { flexShrink: 1 }])}>{ch}</Text>;
+                  }
+                  return ch;
+                });
+                built = <Text style={pStyle}>{normalizedChildren}</Text>;
               }
-            }}
-          >
-            {linkText}
-          </Text>
-        );
+            }
+            break;
+          }
+          case 'ATXHeading1':
+          case 'ATXHeading2':
+          case 'ATXHeading3':
+          case 'ATXHeading4':
+          case 'ATXHeading5':
+          case 'ATXHeading6':
+          case 'SetextHeading1':
+          case 'SetextHeading2': {
+            built = <Text style={[frame.styleForChildren, { marginVertical: 8 }]}>{frame.children}</Text>;
+            break;
+          }
+          case 'BulletList':
+          case 'OrderedList': {
+            const topLevel = (stack[stack.length - 1]?.name === 'Document');
+            built = <View style={{ marginVertical: 6, flexShrink: 1, minWidth: 0, maxWidth: '100%', marginLeft: topLevel ? 0 : 0 }}>{frame.children}</View>;
+            break;
+          }
+          case 'ListItem': {
+            const isOrdered = frame.parentName === 'OrderedList';
+            const num = isOrdered ? extractListItemNumberFromNode(node) : undefined;
+            const digits = isOrdered ? String(num || 1).length : 1;
+            const markerWidth = isOrdered ? (digits >= 3 ? 22 : digits === 2 ? 16 : 12) : 12;
+            const markerStyle = normalizeTextStyle([
+              frame.styleForChildren,
+              { width: markerWidth, marginRight: 4, marginVertical: 4, textAlign: 'right', flexShrink: 0, alignSelf: 'flex-start' }
+            ]);
+            const indent = Math.max(0, (frame.listDepth - 1) * 4);
+            built = (
+              <View style={{ flexDirection: 'row', alignItems: 'flex-start', marginLeft: indent, marginVertical: 2, maxWidth: '100%' }}>
+                <Text style={markerStyle}>{isOrdered ? `${num || '1'}.` : '•'}</Text>
+                <View style={{ flex: 1, minWidth: 0, flexShrink: 1, maxWidth: '100%' }}>{frame.children}</View>
+              </View>
+            );
+            break;
+          }
+          case 'Emphasis':
+          case 'StrongEmphasis':
+          case 'Strikethrough': {
+            const normalizedChildren = frame.children.map((ch, i) => {
+              if (typeof ch === 'string' || typeof ch === 'number') {
+                return <Text key={`is-${i}`} style={normalizeTextStyle(frame.styleForChildren)}>{ch}</Text>;
+              }
+              return ch;
+            });
+            built = <Text style={normalizeTextStyle(frame.styleForChildren)}>{normalizedChildren}</Text>;
+            break;
+          }
+          case 'Link': {
+            const url = getLinkUrlFromNode(node);
+            const label = frame.children.map(flattenText).join('');
+            built = (
+              <Text
+                style={normalizeTextStyle(frame.styleForChildren)}
+                accessibilityRole="link"
+                accessibilityLabel={label}
+                onPress={() => { if (url) { try { Linking.openURL(url); } catch {} } }}
+              >
+                {frame.children}
+              </Text>
+            );
+            break;
+          }
+          case 'Blockquote':
+            built = (
+              <View style={{ borderLeftWidth: 3, borderLeftColor: '#C7C7CC', paddingLeft: 10, marginVertical: 6 }}>
+                <Text style={normalizeTextStyle([frame.styleForChildren, { color: '#333' }])}>{frame.children}</Text>
+              </View>
+            );
+            break;
+          default:
+            // Unknown containers: render their children inline
+            built = <Text style={normalizeTextStyle(frame.styleForChildren)}>{frame.children}</Text>;
+            break;
+        }
+
+        // Attach to parent or set as root
+        const parent = stack[stack.length - 1];
+        if (parent) {
+          parent.children.push(
+            React.cloneElement(built as React.ReactElement, { key: `node-${frame.name}-${frame.from}-${frame.to}` })
+          );
+          parent.prevChildName = frame.name;
+          parent.lastEnd = Math.max(parent.lastEnd, frame.to);
+        } else {
+          root = built;
+        }
       }
+    });
 
-      case 'Image': {
-        const altText = this.getImageAltFromCursor(cursor, text) || 'Image';
-        const src = this.getImageUrlFromCursor(cursor, text);
-        // Render functional image with accessible alt text
-        return (
-          <Image
-            accessibilityLabel={altText}
-            source={{ uri: src }}
-            style={{ width: 200, height: 200, resizeMode: 'contain', marginVertical: 6 }}
-          />
-        );
-      }
-
-      case 'Blockquote':
-        return (
-          <View style={{ borderLeftWidth: 3, borderLeftColor: '#C7C7CC', paddingLeft: 10, marginVertical: 6 }}>
-            <Text style={normalizeTextStyle([inheritedStyle, { color: '#333' }])}>{renderChildren('Blockquote', inheritedStyle)}</Text>
-          </View>
-        );
-
-      case 'HorizontalRule':
-        return <View style={{ height: 1, backgroundColor: '#C7C7CC', marginVertical: 8 }} />;
-
-      case 'Text': {
-        const content = text.slice(nodeFrom, nodeTo);
-        if (!content) return null;
-        return <Text style={normalizeTextStyle(inheritedStyle)}>{content}</Text>;
-      }
-
-      // Ignore markup delimiters and metadata
-      case 'EmphasisMark':
-      case 'CodeMark':
-      case 'LinkMark':
-      case 'ImageMark':
-      case 'HeaderMark':
-      case 'ListMark':
-      case 'CodeInfo':
-      case 'QuoteMark':
-      case 'URL':
-        return null;
-
-      case 'CodeText': {
-        const content = text.slice(nodeFrom, nodeTo);
-        return <Text style={normalizeTextStyle(inheritedStyle)}>{content}</Text>;
-      }
-
-      default:
-        throw new Error(`Unhandled Lezer node: ${nodeName}`);
+    // Fallback if no root built
+    if (!root) {
+      root = <Text style={baseStyle}>{text}</Text>;
     }
+    return root;
   }
 
   /**
@@ -539,7 +701,7 @@ export class LezerMarkdownRenderer {
         case 'BulletList':
         case 'OrderedList':
           return (
-            <View key={index} style={{ marginVertical: 6 }}>
+            <View key={index} style={{ marginVertical: 6, width: '100%', maxWidth: '100%', alignSelf: 'stretch' }}>
               {this.renderNodes(node.children, inheritedStyle, node.name)}
             </View>
           );
@@ -557,12 +719,14 @@ export class LezerMarkdownRenderer {
                 alignItems: 'flex-start',
                 marginLeft: depth * 12,
                 marginVertical: 2,
+                width: '100%',
+                maxWidth: '100%',
               }}
             >
               <Text style={[inheritedStyle, { width: 20, marginRight: 4 }]}>
                 {isOrdered ? `${number || '1'}.` : '•'}
               </Text>
-              <View style={{ flex: 1 }}>
+              <View style={{ flex: 1, minWidth: 0, flexShrink: 1 }}>
                 {this.renderNodes(node.children, inheritedStyle, 'ListItem')}
               </View>
             </View>
