@@ -154,7 +154,7 @@ export class OpenAIService {
             content: msg.content,
           })),
           temperature: 0.7,
-          max_tokens: 1000,
+          max_tokens: 10000,
           stream: true,
         }));
       });

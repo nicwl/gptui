@@ -6,10 +6,10 @@
  */
 
 import React from 'react';
-import { Text, View, Platform } from 'react-native';
+import { Text, View, Platform, Image, Linking } from 'react-native';
 import { ScrollView as GHScrollView } from 'react-native-gesture-handler';
 import { parser } from '@lezer/markdown';
-import { Tree, NodeType } from '@lezer/common';
+import { Tree, NodeType, TreeFragment, TreeCursor } from '@lezer/common';
 
 // Types for our rendered components
 export interface MarkdownStyleConfig {
@@ -36,22 +36,13 @@ const HorizontalCodeBlock: React.FC<{
   baseLineHeight: number;
   unicodeStyle: any;
 }> = ({ content, baseFontSize, baseLineHeight, unicodeStyle }) => {
-  const [maxLineWidth, setMaxLineWidth] = React.useState(0);
-
-  const onLineLayout = (e: any) => {
-    const w = e?.nativeEvent?.layout?.width ?? 0;
-    if (w > maxLineWidth) setMaxLineWidth(w);
-  };
-
   const lines = React.useMemo(() => String(content).split('\n'), [content]);
 
   return (
-    <View style={{ flexDirection: 'column', alignSelf: 'flex-start', width: maxLineWidth > 0 ? maxLineWidth : undefined }}>
+    <View style={{ flexDirection: 'column', alignSelf: 'flex-start' }}>
       {lines.map((ln, i) => (
         <Text
           key={i}
-          numberOfLines={1}
-          onLayout={onLineLayout}
           style={[
             unicodeStyle,
             {
@@ -71,6 +62,9 @@ const HorizontalCodeBlock: React.FC<{
 
 export class LezerMarkdownRenderer {
   private styleConfig: MarkdownStyleConfig;
+  // Cache for incremental parsing
+  private lastText: string = '';
+  private lastTree: Tree | null = null;
   
   constructor(styleConfig: MarkdownStyleConfig) {
     this.styleConfig = styleConfig;
@@ -80,90 +74,413 @@ export class LezerMarkdownRenderer {
    * Parse markdown text and render as React components
    */
   render(text: string, baseStyle: any): React.ReactNode {
-    try {
-      const tree = parser.parse(text);
-      const renderTree = this.lezerTreeToRenderTree(tree, text);
-      return this.renderNodes([renderTree], baseStyle);
-    } catch (error) {
-      console.warn('Lezer markdown parsing failed, falling back to plain text:', error);
-      return <Text style={baseStyle}>{text}</Text>;
+    const tree = this.parseIncremental(text);
+    const cursor = tree.cursor();
+    // Always render from the root cursor; the parser should not throw
+    if (cursor.name !== 'Document') {
+      return [<Text key="root-fallback" style={baseStyle}>{text}</Text>];
     }
+    const root = this.renderNodeAtCursor(cursor, text, baseStyle, undefined);
+    return [root];
+  }
+
+  // Incremental parsing: reuse previous tree when text grows by appending
+  private parseIncremental(text: string): Tree {
+    let nextTree: Tree;
+    if (this.lastTree && text.startsWith(this.lastText)) {
+      // Reuse previous tree fragments for incremental parsing
+      const fragments = TreeFragment.addTree(this.lastTree);
+      nextTree = parser.parse(text, fragments);
+    } else {
+      nextTree = parser.parse(text);
+    }
+    this.lastText = text;
+    this.lastTree = nextTree;
+    return nextTree;
   }
 
   /**
-   * Convert Lezer tree to our render tree structure
+   * Render directly from the Lezer cursor without constructing an intermediate render tree
    */
-  private lezerTreeToRenderTree(tree: Tree, text: string): LezerRenderNode {
-    const buildNode = (cursor: any): LezerRenderNode => {
-      const node: LezerRenderNode = {
-        type: cursor.type.id.toString(),
-        name: cursor.type.name,
-        from: cursor.from,
-        to: cursor.to,
-        children: []
+  private renderNodeAtCursor(cursor: TreeCursor, text: string, inheritedStyle: any, parentNodeName?: string): React.ReactNode {
+    const nodeName: string = cursor.name;
+    const nodeFrom: number = cursor.from;
+    const nodeTo: number = cursor.to;
+    const baseFontSize = this.styleConfig.fontSize;
+    const baseLineHeight = this.styleConfig.lineHeight;
+    const unicodeStyle = {} as const;
+
+    const normalizeTextStyle = (style: any): any => {
+      if (!style) return style;
+      if (!Array.isArray(style)) return style;
+      const flat: any[] = [];
+      const flatten = (s: any) => {
+        if (!s) return;
+        if (Array.isArray(s)) s.forEach(flatten);
+        else flat.push(s);
       };
-
-      // Check if this node has children
-      if (cursor.firstChild()) {
-        let lastEnd = node.from; // Use the parent node's start position
-        
-        do {
-          // Add text content before this child if there's a gap
-          if (cursor.from > lastEnd) {
-            const textContent = text.slice(lastEnd, cursor.from);
-            if (textContent.length > 0) {
-              node.children.push({
-                type: 'text',
-                name: 'Text',
-                from: lastEnd,
-                to: cursor.from,
-                content: textContent,
-                children: []
-              });
-            }
-          }
-          
-          // Add the child node
-          node.children.push(buildNode(cursor));
-          lastEnd = cursor.to;
-        } while (cursor.nextSibling());
-        
-        // Add any remaining text after the last child
-        if (lastEnd < node.to) {
-          const textContent = text.slice(lastEnd, node.to);
-          if (textContent.length > 0) {
-            node.children.push({
-              type: 'text',
-              name: 'Text',
-              from: lastEnd,
-              to: node.to,
-              content: textContent,
-              children: []
-            });
-          }
-        }
-        
-        cursor.parent();
-      } else {
-        // Leaf node - add content directly
-        node.content = text.slice(cursor.from, cursor.to);
-      }
-      
-      // For certain nodes that should always have content extracted, even if they have children
-      if (['CodeText'].includes(node.name) && !node.content) {
-        node.content = text.slice(cursor.from, cursor.to);
-      }
-
-      return node;
+      flatten(style);
+      return flat;
     };
 
-    const cursor = tree.cursor();
-    return buildNode(cursor);
+    const renderChildren = (childParentName?: string, childStyle?: any): React.ReactNode[] => {
+      const elements: React.ReactNode[] = [];
+      const c = cursor.node.cursor();
+      const parentFrom = nodeFrom;
+      const parentTo = nodeTo;
+      let lastEnd = parentFrom;
+      let prevChildName: string | null = null;
+      const normalizeGap = (s: string) => {
+        if (childParentName === 'Paragraph') return s.replace(/\n/g, ' ');
+        if (
+          childParentName === 'BulletList' ||
+          childParentName === 'OrderedList' ||
+          childParentName === 'Document'
+        ) return '';
+        if (
+          (childParentName && childParentName.startsWith('ATXHeading')) ||
+          childParentName === 'SetextHeading1' ||
+          childParentName === 'SetextHeading2'
+        ) {
+          // Suppress whitespace-only gaps inside headings (e.g. after '#' marks or trailing spaces)
+          return /\S/.test(s) ? s : '';
+        }
+        return s;
+      };
+      if (!c.firstChild()) return elements;
+      do {
+        if (c.from > lastEnd) {
+          let gap = text.slice(lastEnd, c.from);
+          // Special-case: inside headings, drop leading spaces immediately after the header mark
+          const isHeading = !!(childParentName && (childParentName.startsWith('ATXHeading') || childParentName === 'SetextHeading1' || childParentName === 'SetextHeading2'));
+          if (isHeading && prevChildName === 'HeaderMark') {
+            gap = gap.replace(/^\s+/, '');
+          }
+          gap = normalizeGap(gap);
+          if (gap.length > 0) {
+            elements.push(
+              <Text key={`gap-${childParentName}-${lastEnd}-${c.from}`} style={childStyle ?? inheritedStyle}>{gap}</Text>
+            );
+          }
+        }
+        const rendered = this.renderNodeAtCursor(c, text, childStyle ?? inheritedStyle, childParentName);
+        if (rendered !== null && rendered !== undefined) {
+          elements.push(
+            React.cloneElement(rendered as React.ReactElement, {
+              key: `childof-${childParentName}-${c.from}-${c.to}`,
+            })
+          );
+        }
+        prevChildName = c.name;
+        lastEnd = c.to;
+      } while (c.nextSibling());
+      if (lastEnd < parentTo) {
+        const trailing = normalizeGap(text.slice(lastEnd, parentTo));
+        if (trailing.length > 0) {
+          elements.push(
+            <Text key={`trail-${childParentName}-${lastEnd}-${parentTo}`} style={childStyle ?? inheritedStyle}>{trailing}</Text>
+          );
+        }
+      }
+      return elements.filter(Boolean);
+    };
+
+    switch (nodeName) {
+      case 'Document':
+        return <View style={inheritedStyle}>{renderChildren('Document')}</View>;
+
+      case 'Paragraph': {
+        // Render children and decide container based on whether they include non-Text elements
+        const childrenEls = renderChildren('Paragraph', inheritedStyle);
+        if (!childrenEls || childrenEls.length === 0) {
+          // No inline children: render full paragraph content directly
+          let content = text.slice(nodeFrom, nodeTo);
+          content = content.replace(/\n/g, ' ');
+          const pStyle = normalizeTextStyle([inheritedStyle, { marginVertical: 4 }]);
+          return <Text style={pStyle}>{content}</Text>;
+        }
+        const containsNonText = childrenEls.some((el: any) => {
+          if (!el || !('type' in el)) return false;
+          const t = (el as any).type;
+          const isText = t === Text || (typeof t === 'string' && String(t).toLowerCase() === 'text');
+          return !isText;
+        });
+        if (containsNonText) {
+          // Use a View to allow non-Text children (e.g., Image) inside the paragraph
+          return <View style={{ marginVertical: 4 }}>{childrenEls}</View>;
+        }
+        // Only Text children → safe to wrap with Text
+        const pStyle = normalizeTextStyle([inheritedStyle, { marginVertical: 4 }]);
+        return <Text style={pStyle}>{childrenEls}</Text>;
+      }
+
+      case 'ATXHeading1':
+      case 'ATXHeading2':
+      case 'ATXHeading3':
+      case 'ATXHeading4':
+      case 'ATXHeading5':
+      case 'ATXHeading6':
+      case 'SetextHeading1':
+      case 'SetextHeading2': {
+        const level = this.getHeadingLevel(nodeName);
+        const headingScales = [1.6, 1.4, 1.2, 1.1, 1.05, 1.0];
+        const headingScale = headingScales[Math.max(0, Math.min(5, level - 1))];
+        const headingStyle = [
+          inheritedStyle,
+          {
+            fontSize: baseFontSize * headingScale,
+            lineHeight: Math.round(baseLineHeight * headingScale),
+            fontWeight: 'bold',
+          },
+        ];
+        return (
+          <Text style={[headingStyle, { marginVertical: 8 }]}> 
+            {renderChildren(nodeName, headingStyle)}
+          </Text>
+        );
+      }
+
+      case 'BulletList':
+      case 'OrderedList':
+        return <View style={{ marginVertical: 6 }}>{renderChildren(nodeName, inheritedStyle)}</View>;
+
+      case 'ListItem': {
+        const isOrdered = parentNodeName === 'OrderedList';
+        const number = isOrdered ? this.extractListItemNumberFromCursor(cursor, text) : undefined;
+        // Render the content inside a side-by-side layout
+        // We need to render children but skip ListMark nodes (handled by marker)
+        const contentNodes: React.ReactNode[] = [];
+        {
+          const c = cursor.node.cursor();
+          if (c.firstChild()) {
+            do {
+              if (c.name === 'ListMark') continue;
+              const rendered = this.renderNodeAtCursor(c, text, inheritedStyle, 'ListItem');
+              if (rendered !== null && rendered !== undefined) {
+                contentNodes.push(
+                  React.cloneElement(rendered as React.ReactElement, {
+                    key: `listitem-${c.from}-${c.to}`,
+                  })
+                );
+              }
+            } while (c.nextSibling());
+          }
+        }
+        const markerStyle = normalizeTextStyle([inheritedStyle, { width: 16, marginVertical: 4 }]);
+        return (
+          <View style={{ flexDirection: 'row', alignItems: 'flex-start', marginLeft: 12, marginVertical: 2 }}>
+            <Text style={markerStyle}>
+              {isOrdered ? `${number || '1'}.` : '•'}
+            </Text>
+            <View style={{ flex: 1 }}>{contentNodes}</View>
+          </View>
+        );
+      }
+
+      case 'CodeBlock':
+      case 'FencedCode': {
+        const content = this.getCodeBlockContentFromCursor(cursor, text);
+        const language = this.getCodeLanguageFromCursor(cursor, text);
+        return (
+          <View style={{ marginVertical: 8 }}>
+            <View
+              style={{
+                backgroundColor: 'rgba(0,0,0,0.05)',
+                borderRadius: 6,
+                borderLeftWidth: 3,
+                borderLeftColor: '#007AFF',
+              }}
+            >
+              {language && language.toLowerCase() === 'markdown' ? (
+                <Text
+                  style={[
+                    unicodeStyle,
+                    {
+                      fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+                      fontSize: baseFontSize * 0.9,
+                      lineHeight: baseLineHeight,
+                      padding: 12,
+                    },
+                  ]}
+                >
+                  {content}
+                </Text>
+              ) : (
+                <GHScrollView
+                  horizontal
+                  bounces={false}
+                  showsHorizontalScrollIndicator
+                  nestedScrollEnabled
+                  directionalLockEnabled
+                  keyboardShouldPersistTaps="handled"
+                  onStartShouldSetResponderCapture={() => true}
+                  onMoveShouldSetResponderCapture={() => true}
+                  style={{ maxWidth: '100%', flexGrow: 0, flexShrink: 0 }}
+                  contentContainerStyle={{ flexGrow: 0, paddingBottom: 12, paddingLeft: 12, paddingTop: 9, paddingRight: 6 }}
+                  scrollEventThrottle={16}
+                >
+                  <HorizontalCodeBlock content={content} baseFontSize={baseFontSize} baseLineHeight={baseLineHeight} unicodeStyle={unicodeStyle} />
+                </GHScrollView>
+              )}
+            </View>
+          </View>
+        );
+      }
+
+      case 'InlineCode':
+        const inlineCodeStyle = normalizeTextStyle([
+          inheritedStyle,
+          {
+            fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+            backgroundColor: 'rgba(0,0,0,0.1)',
+            paddingHorizontal: 4,
+            borderRadius: 3,
+            fontSize: (inheritedStyle?.fontSize || baseFontSize) * 0.9,
+          },
+        ]);
+        return (
+          <Text style={inlineCodeStyle}>
+            {this.getInlineCodeContentFromCursor(cursor, text)}
+          </Text>
+        );
+
+      case 'HardBreak':
+        // Render a newline within the current paragraph context
+        return <Text style={normalizeTextStyle(inheritedStyle)}>{'\n'}</Text>;
+
+      case 'SoftBreak':
+        // Render a space for soft line breaks
+        return <Text style={normalizeTextStyle(inheritedStyle)}>{' '}</Text>;
+
+      case 'HTMLTag': {
+        const segment = text.slice(nodeFrom, nodeTo);
+        // Extract tag name from opening tag
+        const openMatch = segment.match(/<\s*([A-Za-z][\w-]*)[^>]*>/);
+        const tagName = openMatch ? openMatch[1] : 'html';
+        const isSelfClosing = /<[^>]*\/>\s*$/.test(segment);
+        let inner: string | null = null;
+        if (!isSelfClosing) {
+          // Try to extract inner content between first opening and last closing tag
+          const innerMatch = segment.match(/<[^>]*>([\s\S]*)<\/\s*([A-Za-z][\w-]*)\s*>/);
+          inner = innerMatch ? innerMatch[1] : null;
+        }
+        const elements: React.ReactNode[] = [];
+        elements.push(
+          <Text key={`htmltag-open-${nodeFrom}`} style={normalizeTextStyle(inheritedStyle)}>{`<${tagName}>`}</Text>
+        );
+        if (inner && inner.length > 0) {
+          elements.push(
+            <Text key={`htmltag-inner-${nodeFrom}`} style={normalizeTextStyle(inheritedStyle)}>{inner}</Text>
+          );
+        }
+        if (!isSelfClosing) {
+          elements.push(
+            <Text key={`htmltag-close-${nodeFrom}`} style={normalizeTextStyle(inheritedStyle)}>{`</${tagName}>`}</Text>
+          );
+        }
+        return <Text style={normalizeTextStyle(inheritedStyle)}>{elements}</Text>;
+      }
+
+      case 'Escape': {
+        // Render escaped character literally (drop leading backslash if present)
+        const segment = text.slice(nodeFrom, nodeTo);
+        const literal = segment.startsWith('\\') ? segment.slice(1) : segment;
+        return <Text style={normalizeTextStyle(inheritedStyle)}>{literal}</Text>;
+      }
+
+      case 'Emphasis': {
+        const styleWithItalic = [inheritedStyle, { fontStyle: 'italic' }];
+        const tStyle = normalizeTextStyle(styleWithItalic);
+        return <Text style={tStyle}>{renderChildren('Emphasis', styleWithItalic)}</Text>;
+      }
+
+      case 'StrongEmphasis': {
+        const styleWithBold = [inheritedStyle, { fontWeight: 'bold' }];
+        const tStyle = normalizeTextStyle(styleWithBold);
+        return <Text style={tStyle}>{renderChildren('StrongEmphasis', styleWithBold)}</Text>;
+      }
+
+      case 'Strikethrough': {
+        const styleWithStrike = [inheritedStyle, { textDecorationLine: 'line-through' }];
+        const tStyle = normalizeTextStyle(styleWithStrike);
+        return <Text style={tStyle}>{renderChildren('Strikethrough', styleWithStrike)}</Text>;
+      }
+
+      case 'Link': {
+        // Only render the visible link text, not the URL
+        const url = this.getLinkUrlFromCursor(cursor, text);
+        const linkText = this.getLinkTextFromCursor(cursor, text);
+        return (
+          <Text
+            style={normalizeTextStyle([inheritedStyle, { color: '#007AFF', textDecorationLine: 'underline' }])}
+            accessibilityRole="link"
+            accessibilityLabel={linkText}
+            onPress={() => {
+              if (url) {
+                try { Linking.openURL(url); } catch {}
+              }
+            }}
+          >
+            {linkText}
+          </Text>
+        );
+      }
+
+      case 'Image': {
+        const altText = this.getImageAltFromCursor(cursor, text) || 'Image';
+        const src = this.getImageUrlFromCursor(cursor, text);
+        // Render functional image with accessible alt text
+        return (
+          <Image
+            accessibilityLabel={altText}
+            source={{ uri: src }}
+            style={{ width: 200, height: 200, resizeMode: 'contain', marginVertical: 6 }}
+          />
+        );
+      }
+
+      case 'Blockquote':
+        return (
+          <View style={{ borderLeftWidth: 3, borderLeftColor: '#C7C7CC', paddingLeft: 10, marginVertical: 6 }}>
+            <Text style={normalizeTextStyle([inheritedStyle, { color: '#333' }])}>{renderChildren('Blockquote', inheritedStyle)}</Text>
+          </View>
+        );
+
+      case 'HorizontalRule':
+        return <View style={{ height: 1, backgroundColor: '#C7C7CC', marginVertical: 8 }} />;
+
+      case 'Text': {
+        const content = text.slice(nodeFrom, nodeTo);
+        if (!content) return null;
+        return <Text style={normalizeTextStyle(inheritedStyle)}>{content}</Text>;
+      }
+
+      // Ignore markup delimiters and metadata
+      case 'EmphasisMark':
+      case 'CodeMark':
+      case 'LinkMark':
+      case 'ImageMark':
+      case 'HeaderMark':
+      case 'ListMark':
+      case 'CodeInfo':
+      case 'QuoteMark':
+      case 'URL':
+        return null;
+
+      case 'CodeText': {
+        const content = text.slice(nodeFrom, nodeTo);
+        return <Text style={normalizeTextStyle(inheritedStyle)}>{content}</Text>;
+      }
+
+      default:
+        throw new Error(`Unhandled Lezer node: ${nodeName}`);
+    }
   }
 
   /**
    * Render nodes to React components
    */
+  // Legacy helper retained for compatibility (unused in new cursor-driven path)
   private renderNodes(nodes: LezerRenderNode[], inheritedStyle: any, parentNodeName?: string): React.ReactNode[] {
     const unicodeStyle = {} as const;
     const baseFontSize = this.styleConfig.fontSize;
@@ -430,6 +747,150 @@ export class LezerMarkdownRenderer {
     }).filter(Boolean);
   }
 
+  // Cursor-based helpers
+  private getCodeLanguageFromCursor(cursor: any, text: string): string | undefined {
+    // Use a cloned cursor to avoid mutating the current one
+    const c = cursor.node.cursor();
+    let lang: string | undefined;
+    if (c.firstChild()) {
+      do {
+        if (c.name === 'CodeInfo') {
+          lang = text.slice(c.from, c.to).trim();
+          break;
+        }
+      } while (c.nextSibling());
+    }
+    return lang;
+  }
+
+  private getCodeBlockContentFromCursor(cursor: any, text: string): string {
+    // Prefer CodeText child content using a cloned cursor
+    const c = cursor.node.cursor();
+    let content = '';
+    if (c.firstChild()) {
+      do {
+        if (c.name === 'CodeText') {
+          content = text.slice(c.from, c.to);
+          break;
+        }
+      } while (c.nextSibling());
+    }
+    if (content) return content;
+    return text.slice(cursor.from, cursor.to);
+  }
+
+  private getInlineCodeContentFromCursor(cursor: any, text: string): string {
+    // InlineCode typically has only CodeMark children; take content between the first and last marks
+    const c = cursor.node.cursor();
+    let leftEnd: number | null = null;
+    let rightStart: number | null = null;
+    if (c.firstChild()) {
+      do {
+        if (c.name === 'CodeMark') {
+          const mark = text.slice(c.from, c.to);
+          if (mark.trim().startsWith('`')) {
+            if (leftEnd == null) leftEnd = c.to;
+            rightStart = c.from; // keep updating so we end with the last mark
+          }
+        }
+      } while (c.nextSibling());
+    }
+    if (leftEnd != null && rightStart != null && rightStart >= leftEnd) {
+      return text.slice(leftEnd, rightStart);
+    }
+    return '';
+  }
+
+  private getLinkUrlFromCursor(cursor: any, text: string): string {
+    const c = cursor.node.cursor();
+    let url = '#';
+    if (c.firstChild()) {
+      do {
+        if (c.name === 'URL') {
+          url = text.slice(c.from, c.to);
+          break;
+        }
+      } while (c.nextSibling());
+    }
+    return url;
+  }
+
+  private getLinkTextFromCursor(cursor: any, text: string): string {
+    // Link label is not represented as a child node; compute slice between '[' and ']'
+    const c = cursor.node.cursor();
+    let leftEnd: number | null = null;
+    let rightStart: number | null = null;
+    if (c.firstChild()) {
+      do {
+        if (c.name === 'LinkMark') {
+          const s = text.slice(c.from, c.to);
+          if (s === '[') leftEnd = c.to;
+          if (s === ']') rightStart = c.from;
+        }
+      } while (c.nextSibling());
+    }
+    if (leftEnd != null && rightStart != null && rightStart >= leftEnd) {
+      return text.slice(leftEnd, rightStart).trim();
+    }
+    return '';
+  }
+
+  private getImageAltFromCursor(cursor: any, text: string): string | undefined {
+    // Image alt text is between '![' and ']'
+    const c = cursor.node.cursor();
+    let leftEnd: number | null = null;
+    let rightStart: number | null = null;
+    if (c.firstChild()) {
+      do {
+        if (c.name === 'LinkMark') {
+          const s = text.slice(c.from, c.to);
+          if (s === '![') leftEnd = c.to;
+          if (s === ']') rightStart = c.from;
+        }
+      } while (c.nextSibling());
+    }
+    if (leftEnd != null && rightStart != null && rightStart >= leftEnd) {
+      const label = text.slice(leftEnd, rightStart).trim();
+      return label.length > 0 ? label : undefined;
+    }
+    return undefined;
+  }
+
+  private getImageUrlFromCursor(cursor: any, text: string): string {
+    // Find URL child or parse from source
+    const c = cursor.node.cursor();
+    let url: string | undefined;
+    if (c.firstChild()) {
+      do {
+        if (c.name === 'URL') {
+          url = text.slice(c.from, c.to).trim();
+          break;
+        }
+      } while (c.nextSibling());
+    }
+    if (url) return url;
+    const segment = text.slice(cursor.from, cursor.to);
+    const m = segment.match(/\(([^)]+)\)/);
+    return (m ? m[1].trim() : '#');
+  }
+
+  private extractListItemNumberFromCursor(cursor: any, text: string): number {
+    const c = cursor.node.cursor();
+    let num = 1;
+    if (c.firstChild()) {
+      do {
+        if (c.name === 'ListMark') {
+          const mark = text.slice(c.from, c.to);
+          const m = mark.match(/^(\d+)\./);
+          if (m) {
+            num = parseInt(m[1], 10);
+            break;
+          }
+        }
+      } while (c.nextSibling());
+    }
+    return num;
+  }
   private getHeadingLevel(nodeName: string): number {
     if (nodeName.includes('1') || nodeName === 'SetextHeading1') return 1;
     if (nodeName.includes('2') || nodeName === 'SetextHeading2') return 2;

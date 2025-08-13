@@ -138,15 +138,18 @@ export const LezerStreamingText: React.FC<StreamingTextProps> = ({
   if (isAssistant) {
     if (!hasStartedRevealing) {
       // Before streaming starts, show full content
-      return <>{renderer.render(content, style)}</>;
+      const rendered = renderer.render(content, style);
+      return <>{Array.isArray(rendered) ? rendered.map((item, i) => React.cloneElement(item as React.ReactElement, { key: `static-${i}` })) : rendered}</>;
     } else if (revealedLength >= [...content].length && !isStreaming && wasStreaming) {
       // Streaming complete - show full content
-      return <>{renderer.render(content, style)}</>;
+      const rendered = renderer.render(content, style);
+      return <>{Array.isArray(rendered) ? rendered.map((item, i) => React.cloneElement(item as React.ReactElement, { key: `complete-${i}` })) : rendered}</>;
     } else {
       // During streaming - show partial content
       const visibleChars = [...content].slice(0, revealedLength);
       const visibleContent = visibleChars.join('');
-      return <>{renderer.render(visibleContent, style)}</>;
+      const rendered = renderer.render(visibleContent, style);
+      return <>{Array.isArray(rendered) ? rendered.map((item, i) => React.cloneElement(item as React.ReactElement, { key: `streaming-${i}` })) : rendered}</>;
     }
   }
 

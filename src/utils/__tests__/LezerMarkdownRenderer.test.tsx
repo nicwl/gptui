@@ -8,6 +8,7 @@ jest.mock('react-native', () => ({
   Text: 'Text',
   View: 'View',
   ScrollView: 'ScrollView',
+  Image: 'Image',
   Platform: {
     OS: 'ios',
   },
@@ -107,6 +108,28 @@ describe('LezerMarkdownRenderer', () => {
     ]));
   });
 
+  it('should not render stray space before emoji in headings', () => {
+    const renderer = new LezerMarkdownRenderer(defaultStyleConfig);
+    const md = '# 🌟 Welcome to **Project Aurora**  ';
+    const result = renderer.render(md, defaultStyle);
+
+    expect(Array.isArray(result)).toBe(true);
+    const documentView = (result as any)[0];
+    const headingElement = documentView.props.children[0];
+
+    const extractText = (el: any): string => {
+      if (typeof el === 'string') return el;
+      if (!el) return '';
+      const ch = el.props?.children;
+      if (typeof ch === 'string') return ch;
+      if (Array.isArray(ch)) return ch.map(extractText).join('');
+      return extractText(ch);
+    };
+    const text = extractText(headingElement);
+    expect(text.startsWith('🌟')).toBe(true);
+    expect(text).toContain('Welcome to Project Aurora');
+  });
+
   it('should render code blocks correctly', () => {
     const renderer = new LezerMarkdownRenderer(defaultStyleConfig);
     const result = renderer.render('```javascript\nconsole.log("hello");\n```', defaultStyle);
@@ -202,6 +225,80 @@ describe('LezerMarkdownRenderer', () => {
     expect(children[2].props.children).toBe(' text');
   });
 
+  it('should render hard breaks correctly', () => {
+    const renderer = new LezerMarkdownRenderer(defaultStyleConfig);
+    const md = 'First line\\\nSecond line';
+    const result = renderer.render(md, defaultStyle);
+
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toHaveLength(1);
+
+    const documentView = (result as any)[0];
+    expect(documentView.type).toBe('View');
+
+    const paragraphElement = documentView.props.children[0];
+    expect(paragraphElement.type).toBe('Text');
+
+    const children = paragraphElement.props.children;
+    // Expect three children: 'First line', '\n', 'Second line'
+    expect(Array.isArray(children)).toBe(true);
+    expect(children.length).toBe(3);
+    const c0 = children[0].props ? children[0].props.children : children[0];
+    const c1 = children[1].props ? children[1].props.children : children[1];
+    const c2 = children[2].props ? children[2].props.children : children[2];
+    expect(c0).toBe('First line');
+    expect(c1).toBe('\n');
+    expect(c2).toBe('Second line');
+  });
+
+  it('should render soft breaks as spaces', () => {
+    const renderer = new LezerMarkdownRenderer(defaultStyleConfig);
+    const md = 'First line\nSecond line';
+    const result = renderer.render(md, defaultStyle);
+
+    const documentView = (result as any)[0];
+    const paragraphElement = documentView.props.children[0];
+
+    // Aggregate visible text from the paragraph
+    const findAll = (el: any): string => {
+      if (typeof el === 'string') return el;
+      if (el?.props?.children) {
+        const ch = el.props.children;
+        if (typeof ch === 'string') return ch;
+        if (Array.isArray(ch)) return ch.map(findAll).join('');
+        return findAll(ch);
+      }
+      return '';
+    };
+    const paragraphText = findAll(paragraphElement);
+    expect(paragraphText).toContain('First line Second line');
+  });
+
+  it('should render HTMLTag by showing tag wrappers and inner text', () => {
+    const renderer = new LezerMarkdownRenderer(defaultStyleConfig);
+    const md = 'Here is <span>inline</span> html';
+    const result = renderer.render(md, defaultStyle);
+
+    const documentView = (result as any)[0];
+    const paragraphElement = documentView.props.children[0];
+    const allText = ((): string => {
+      const findAll = (el: any): string => {
+        if (typeof el === 'string') return el;
+        if (el?.props?.children) {
+          const ch = el.props.children;
+          if (typeof ch === 'string') return ch;
+          if (Array.isArray(ch)) return ch.map(findAll).join('');
+          return findAll(ch);
+        }
+        return '';
+      };
+      return findAll(paragraphElement);
+    })();
+    expect(allText).toContain('<span>');
+    expect(allText).toContain('inline');
+    expect(allText).toContain('</span>');
+  });
+
   it('should render unordered lists correctly', () => {
     const renderer = new LezerMarkdownRenderer(defaultStyleConfig);
     const result = renderer.render('- Item 1\n- Item 2\n- Item 3', defaultStyle);
@@ -219,9 +316,9 @@ describe('LezerMarkdownRenderer', () => {
     const listElement = documentView.props.children[0];
     expect(listElement.type).toBe('View'); // BulletList is a View
     
-    // The list contains 5 children (3 items + 2 newlines)
+    // The list contains 3 children (3 items)
     expect(Array.isArray(listElement.props.children)).toBe(true);
-    expect(listElement.props.children).toHaveLength(5);
+    expect(listElement.props.children).toHaveLength(3);
     
     // Check first list item (index 0)
     const firstItem = listElement.props.children[0];
@@ -264,9 +361,9 @@ describe('LezerMarkdownRenderer', () => {
     const listElement = documentView.props.children[0];
     expect(listElement.type).toBe('View'); // OrderedList is a View
     
-    // The list contains 5 children (3 items + 2 newlines)
+    // The list contains 3 children (3 items)
     expect(Array.isArray(listElement.props.children)).toBe(true);
-    expect(listElement.props.children).toHaveLength(5);
+    expect(listElement.props.children).toHaveLength(3);
     
     // Check first list item (index 0) - should have "1." as marker
     const firstItem = listElement.props.children[0];
@@ -305,7 +402,7 @@ describe('LezerMarkdownRenderer', () => {
     expect(firstItemText).toContain('First item');
     
     // Check second list item content
-    const secondItem = listElement.props.children[2]; // Skip newline at index 1
+    const secondItem = listElement.props.children[1];
     expect(secondItem.type).toBe('View');
     const secondItemChildren = secondItem.props.children;
     expect(secondItemChildren[0].props.children).toBe('2.');
@@ -313,7 +410,7 @@ describe('LezerMarkdownRenderer', () => {
     expect(secondItemText).toContain('Second item');
     
     // Check third list item content  
-    const thirdItem = listElement.props.children[4]; // Skip newline at index 3
+    const thirdItem = listElement.props.children[2];
     expect(thirdItem.type).toBe('View');
     const thirdItemChildren = thirdItem.props.children;
     expect(thirdItemChildren[0].props.children).toBe('3.');
@@ -503,7 +600,7 @@ If you want, I can also make you a sample **README.md** that looks like somethin
     
     const children = documentView.props.children;
     
-    // Helper function to extract all text content (enhanced to handle complex nested structures)
+    // Helper function to extract all visible text content (enhanced for links/images)
     const findAllText = (element: any): string => {
       if (typeof element === 'string') return element;
       if (typeof element === 'number') return element.toString();
@@ -512,6 +609,14 @@ If you want, I can also make you a sample **README.md** that looks like somethin
       // Handle React elements
       if (element.props) {
         let text = '';
+
+        // Include accessible labels for links/images (visible alt/label)
+        if (element.props.accessibilityRole === 'link' && typeof element.props.accessibilityLabel === 'string') {
+          text += element.props.accessibilityLabel;
+        }
+        if (element.type === 'Image' && typeof element.props.accessibilityLabel === 'string') {
+          text += element.props.accessibilityLabel;
+        }
         
         // Get text from children
         if (element.props.children) {
@@ -594,7 +699,8 @@ If you want, I can also make you a sample **README.md** that looks like somethin
     expect(allText).toContain('lightweight markup language');
     expect(allText).toContain('plain‑text editor');
     expect(allText).toContain('That\'s it!');
-    expect(allText).toContain('sample README.md'); // Note: should contain bold README.md but formatting may not show in text extraction
+    // README.md appears bold in render; text extraction should still include the word
+    expect(allText).toContain('README.md');
     
     // 3. Check all list items are present
     expect(allText).toContain('Easy to read');
@@ -607,7 +713,7 @@ If you want, I can also make you a sample **README.md** that looks like somethin
     expect(allText).toContain('Oranges');
     expect(allText).toContain('Bananas');
     
-    // 4. Check link content is present
+    // 4. Check link and image content are present (visible label and alt)
     expect(allText).toContain('Visit OpenAI');
     expect(allText).toContain('Markdown Logo');
     
