@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Alert, KeyboardAvoidingView, Platform, Keyboard } from 'react-native';
 import Clipboard from '@react-native-clipboard/clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -32,12 +32,6 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   const [isSidebarVisible, setIsSidebarVisible] = useState(false);
   const [isModelModalVisible, setIsModelModalVisible] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ visible: boolean; message: Message | null }>({ visible: false, message: null });
-
-  // Find current thread, but handle race conditions during thread creation
-  const currentThread = React.useMemo(() => {
-    if (!state.currentThreadId) return null;
-    return state.threads.find(t => t.id === state.currentThreadId) || null;
-  }, [state.currentThreadId, state.threads]);
 
   const toggleSidebar = () => {
     Keyboard.dismiss();
@@ -138,10 +132,10 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
   };
 
 
-  // Memoize message-related state to ensure proper re-renders during streaming
+  // Use messages from app state for the active thread only
   const messages = React.useMemo(() => {
-    return currentThread?.messages || [];
-  }, [currentThread?.messages]);
+    return state.currentThreadMessages;
+  }, [state.currentThreadMessages]);
 
 
   const handleLongPressMessage = (message: Message) => {

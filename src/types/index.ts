@@ -16,12 +16,23 @@ export interface Thread {
   updatedAt: number;
 }
 
+export interface ThreadSummary {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  messageCount: number;
+  lastMessage?: Message; // content is truncated for storage/display
+}
+
 export interface AppState {
-  threads: Thread[];
+  threads: ThreadSummary[];
   currentThreadId: string | null;
   apiKey: string | null;
   isLoading: boolean;
   selectedModel: string;
+  // Only keep the active thread's full message history in memory
+  currentThreadMessages: Message[];
 }
 
 export interface OpenAIResponse {

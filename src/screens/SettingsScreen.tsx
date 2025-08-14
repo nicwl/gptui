@@ -210,13 +210,13 @@ const SettingsScreen: React.FC<Props> = ({ navigation }) => {
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Conversations:</Text>
           <Text style={styles.infoValue}>
-            {state.threads.filter(t => t.messages.length > 0).length}
+            {state.threads.filter(t => t.messageCount > 0).length}
           </Text>
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Total Messages:</Text>
           <Text style={styles.infoValue}>
-            {state.threads.reduce((sum, thread) => sum + thread.messages.length, 0)}
+            {state.threads.reduce((sum, thread) => sum + thread.messageCount, 0)}
           </Text>
         </View>
       </View>

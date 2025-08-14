@@ -1,5 +1,5 @@
 import uuid from 'react-native-uuid';
-import { Thread, Message } from '../types';
+import { Thread, Message, ThreadSummary } from '../types';
 import { StorageService } from './StorageService';
 import { OpenAIService } from './OpenAIService';
 
@@ -290,7 +290,7 @@ export class ThreadService {
     return updatedThread;
   }
 
-  async loadAllThreads(): Promise<Thread[]> {
+  async loadAllThreads(): Promise<ThreadSummary[]> {
     return await StorageService.loadThreads();
   }
 
@@ -300,5 +300,9 @@ export class ThreadService {
 
   async clearAllThreads(): Promise<void> {
     await StorageService.clearAllData();
+  }
+
+  async loadThreadById(threadId: string): Promise<Thread | null> {
+    return await StorageService.loadThreadById(threadId);
   }
 }

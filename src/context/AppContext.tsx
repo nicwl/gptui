@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, useEffect, ReactNode, useMemo } from 'react';
-import { Thread, AppState, Message } from '../types';
+import { Thread, ThreadSummary, AppState, Message } from '../types';
 import uuid from 'react-native-uuid';
 import { SecureStorage } from '../services/SecureStorage';
 import { StorageService } from '../services/StorageService';
@@ -14,7 +14,7 @@ interface AppContextType {
     setApiKey: (apiKey: string) => Promise<void>;
     loadThreads: () => Promise<void>;
     createNewThread: () => void;
-    setCurrentThread: (threadId: string | null) => void;
+    setCurrentThread: (threadId: string | null) => Promise<void>;
     sendMessage: (message: string) => Promise<void>;
     deleteThread: (threadId: string) => Promise<void>;
     updateStreamingMessage: (threadId: string, messageId: string, content: string, done: boolean, model?: string) => void;
@@ -25,14 +25,15 @@ interface AppContextType {
 
 type AppAction =
   | { type: 'SET_API_KEY'; payload: string | null }
-  | { type: 'SET_THREADS'; payload: Thread[] }
+  | { type: 'SET_THREADS'; payload: ThreadSummary[] }
   | { type: 'SET_CURRENT_THREAD'; payload: string | null }
-  | { type: 'UPDATE_THREAD'; payload: Thread }
+  | { type: 'UPSERT_THREAD_META'; payload: ThreadSummary }
   | { type: 'DELETE_THREAD'; payload: string }
   | { type: 'UPDATE_STREAMING_MESSAGE'; payload: { threadId: string; messageId: string; content: string; done: boolean; model?: string } }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'SET_MODEL'; payload: string }
-  | { type: 'CREATE_THREAD_WITH_MESSAGE'; payload: { thread: Thread; message: Message } };
+  | { type: 'CREATE_THREAD_WITH_MESSAGE'; payload: { thread: Thread; message: Message } }
+  | { type: 'SET_CURRENT_THREAD_MESSAGES'; payload: Message[] };
 
 const initialState: AppState = {
   threads: [],
@@ -40,6 +41,7 @@ const initialState: AppState = {
   apiKey: null,
   isLoading: false,
   selectedModel: 'gpt-5-chat-latest',
+  currentThreadMessages: [],
 };
 
 // Debug flag to disable AI responses (useful for UI testing Markdown rendering)
@@ -55,17 +57,15 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, threads: action.payload };
     case 'SET_CURRENT_THREAD':
       console.log('🎯 AppContext: Setting current thread to:', action.payload);
-      return { ...state, currentThreadId: action.payload };
-    case 'UPDATE_THREAD':
+      return { ...state, currentThreadId: action.payload, currentThreadMessages: [] };
+    case 'UPSERT_THREAD_META':
       const updatedThreads = state.threads.map(thread =>
         thread.id === action.payload.id ? action.payload : thread
       );
-      // Add thread if it doesn't exist
       if (!state.threads.find(t => t.id === action.payload.id)) {
         console.log('➕ AppContext: Adding new thread to state:', action.payload.id);
         updatedThreads.push(action.payload);
       }
-      // Always keep most-recently-active threads first
       updatedThreads.sort((a, b) => b.updatedAt - a.updatedAt);
       console.log('📊 AppContext: State now has', updatedThreads.length, 'threads');
       return { ...state, threads: updatedThreads };
@@ -86,53 +86,60 @@ function appReducer(state: AppState, action: AppAction): AppState {
         messages: [message],
         updatedAt: Date.now(),
       };
-      const allThreads = [...state.threads, threadWithMessage].sort((a, b) => b.updatedAt - a.updatedAt);
+      const threadSummary: ThreadSummary = {
+        id: threadWithMessage.id,
+        name: threadWithMessage.name,
+        createdAt: threadWithMessage.createdAt,
+        updatedAt: threadWithMessage.updatedAt,
+        messageCount: 1,
+        lastMessage: { ...message },
+      };
+      const allThreads = [...state.threads, threadSummary].sort((a, b) => b.updatedAt - a.updatedAt);
       console.log('🆕 AppContext: Created thread with message atomically:', threadWithMessage.id);
       return {
         ...state,
         threads: allThreads,
         currentThreadId: threadWithMessage.id,
+        currentThreadMessages: [message],
       };
     case 'UPDATE_STREAMING_MESSAGE':
       const { threadId, messageId, content, done, model } = action.payload;
-      
-      const streamingThreads = state.threads.map(thread => {
+      // If update is for the active thread, update currentThreadMessages; otherwise leave them
+      const isActiveThread = state.currentThreadId === threadId;
+      const updatedCurrentMessages = isActiveThread
+        ? state.currentThreadMessages.map(msg => {
+            if (msg.id !== messageId) return msg;
+            const updatedMsg = { ...msg, content, isStreaming: !done } as Message;
+            if (done && model) {
+              (updatedMsg as any).modelName = model;
+            }
+            return updatedMsg;
+          })
+        : state.currentThreadMessages;
+      // Update thread meta list (keep last message only)
+      const threadsForStreaming = state.threads.map(thread => {
         if (thread.id !== threadId) return thread;
-        
-        const updatedMessages = thread.messages.map(msg => {
-          if (msg.id !== messageId) return msg;
-          
-          // Update the streaming message
-          const updatedMsg = {
-            ...msg,
-            content,
-            isStreaming: !done,
-          };
-          
-          // Add model info when streaming is complete
-          if (done && model) {
-            updatedMsg.modelName = model;
-          }
-          
-          return updatedMsg;
-        });
-        
-        return {
-          ...thread,
-          messages: updatedMessages,
-          updatedAt: done ? Date.now() : thread.updatedAt, // Only update timestamp when done
-        };
+        const updatedAt = done ? Date.now() : thread.updatedAt;
+        if (isActiveThread) {
+          const lastMsg = updatedCurrentMessages[updatedCurrentMessages.length - 1];
+          return { ...thread, lastMessage: lastMsg, updatedAt } as ThreadSummary;
+        }
+        // Non-active thread: update lastMessage if same message id
+        const updatedLast = thread.lastMessage && thread.lastMessage.id === messageId
+          ? { ...thread.lastMessage, content, isStreaming: !done, modelName: done ? model : thread.lastMessage.modelName }
+          : thread.lastMessage;
+        return { ...thread, lastMessage: updatedLast, updatedAt } as ThreadSummary;
       });
-      
-      // Sort threads if streaming is complete
       if (done) {
-        streamingThreads.sort((a, b) => b.updatedAt - a.updatedAt);
+        threadsForStreaming.sort((a, b) => b.updatedAt - a.updatedAt);
       }
-      
       return {
         ...state,
-        threads: streamingThreads,
+        currentThreadMessages: updatedCurrentMessages,
+        threads: threadsForStreaming,
       };
+    case 'SET_CURRENT_THREAD_MESSAGES':
+      return { ...state, currentThreadMessages: action.payload };
     default:
       return state;
   }
@@ -201,6 +208,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     loadThreads: async () => {
       try {
         const threads = await threadService.loadAllThreads();
+        // Ensure only last message is kept in memory for each thread
         dispatch({ type: 'SET_THREADS', payload: threads });
       } catch (error) {
         console.error('Failed to load threads:', error);
@@ -214,8 +222,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
       console.log('🆕 AppContext: Set current thread to null (new chat)');
     },
 
-    setCurrentThread: (threadId: string | null) => {
+    setCurrentThread: async (threadId: string | null) => {
       dispatch({ type: 'SET_CURRENT_THREAD', payload: threadId });
+      if (threadId) {
+        try {
+          dispatch({ type: 'SET_LOADING', payload: true });
+          const full = await threadService.loadThreadById(threadId);
+          dispatch({ type: 'SET_CURRENT_THREAD_MESSAGES', payload: full?.messages || [] });
+        } catch (e) {
+          console.error('Failed to load thread messages:', e);
+          dispatch({ type: 'SET_CURRENT_THREAD_MESSAGES', payload: [] });
+        } finally {
+          dispatch({ type: 'SET_LOADING', payload: false });
+        }
+      } else {
+        dispatch({ type: 'SET_CURRENT_THREAD_MESSAGES', payload: [] });
+      }
     },
 
     sendMessage: async (message: string) => {
@@ -228,8 +250,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         console.error('❌ AppContext: No API key configured');
         throw new Error('API key not configured');
       }
-
-      let currentThread = state.threads.find(t => t.id === state.currentThreadId);
+      let currentThreadSummary = state.threads.find(t => t.id === state.currentThreadId);
       
       // Create user message
       const userMsg: Message = {
@@ -239,33 +260,46 @@ export function AppProvider({ children }: { children: ReactNode }) {
         timestamp: Date.now(),
       };
 
-      // If no current thread, create new thread with message atomically
-      if (!state.currentThreadId || !currentThread) {
+      // Prepare a full thread object and update UI/summary/persistence
+      let baseMessages: Message[] = state.currentThreadMessages;
+      let threadId: string = state.currentThreadId || '';
+      let threadName: string = currentThreadSummary?.name || 'New Chat';
+      let threadCreatedAt: number = currentThreadSummary?.createdAt || Date.now();
+      if (!state.currentThreadId || !currentThreadSummary) {
         console.log('🆕 AppContext: Creating new thread with first message atomically');
         const newThread = threadService.createNewThread();
         dispatch({ type: 'CREATE_THREAD_WITH_MESSAGE', payload: { thread: newThread, message: userMsg } });
-        currentThread = { ...newThread, messages: [userMsg], updatedAt: Date.now() };
+        baseMessages = [userMsg];
+        threadId = newThread.id;
+        threadName = newThread.name;
+        threadCreatedAt = newThread.createdAt;
+        const newFullThread = { ...newThread, messages: baseMessages, updatedAt: Date.now() } as Thread;
+        try { await StorageService.saveThread(newFullThread); } catch {}
       } else {
-        // Existing thread - optimistically add user's message
-        console.log('🎯 AppContext: Adding message to existing thread with', currentThread.messages.length, 'messages');
-        const optimisticThread: Thread = {
-          ...currentThread,
-          messages: [...currentThread.messages, userMsg],
-          updatedAt: Date.now(),
+        // Ensure full history is loaded if needed
+        if (baseMessages.length === 0) {
+          const loaded = await threadService.loadThreadById(currentThreadSummary.id);
+          baseMessages = loaded?.messages ?? [];
+        }
+        const updatedAt = Date.now();
+        const newCount = currentThreadSummary.messageCount + 1;
+        const optimisticMeta: ThreadSummary = {
+          id: currentThreadSummary.id,
+          name: currentThreadSummary.name,
+          createdAt: currentThreadSummary.createdAt,
+          updatedAt,
+          messageCount: newCount,
+          lastMessage: userMsg,
         };
-        console.log('⚡ AppContext: Optimistically updating thread with user message');
-        dispatch({ type: 'UPDATE_THREAD', payload: optimisticThread });
-        currentThread = optimisticThread;
-      }
-
-      // 2) Persist user message (for storage only, don't update UI state)
-      try {
-        // Just save the current thread state with the message to storage
-        await StorageService.saveThread(currentThread);
-        console.log('💾 AppContext: Persisted thread with user message to storage');
-      } catch (error) {
-        console.error('❌ AppContext: Failed to persist user message:', error);
-        // Keep optimistic state even if persistence fails
+        dispatch({ type: 'UPSERT_THREAD_META', payload: optimisticMeta });
+        const nextUserMessages = [...baseMessages, userMsg];
+        dispatch({ type: 'SET_CURRENT_THREAD_MESSAGES', payload: nextUserMessages });
+        threadId = currentThreadSummary.id;
+        threadName = currentThreadSummary.name;
+        threadCreatedAt = currentThreadSummary.createdAt;
+        const fullThreadNow = { id: currentThreadSummary.id, name: currentThreadSummary.name, createdAt: currentThreadSummary.createdAt, updatedAt, messages: nextUserMessages } as Thread;
+        try { await StorageService.saveThread(fullThreadNow); } catch {}
+        baseMessages = nextUserMessages;
       }
 
       // If AI responses are disabled, stop here (only show user's Markdown message)
@@ -284,23 +318,41 @@ export function AppProvider({ children }: { children: ReactNode }) {
         isStreaming: true,
       };
       
-      const threadWithAI: Thread = {
-        ...currentThread,
-        messages: [...currentThread.messages, aiMsg],
-        updatedAt: Date.now(),
-      };
-      
       console.log('🤖 AppContext: Adding initial streaming AI message to state');
-      dispatch({ type: 'UPDATE_THREAD', payload: threadWithAI });
-      currentThread = threadWithAI;
+      const nextMessages = [...(state.currentThreadMessages.length ? state.currentThreadMessages : baseMessages), aiMsg];
+      dispatch({ type: 'SET_CURRENT_THREAD_MESSAGES', payload: nextMessages });
+      const lastForMeta = aiMsg;
+      const metaForAI: ThreadSummary = {
+        id: threadId,
+        name: threadName,
+        createdAt: threadCreatedAt,
+        updatedAt: Date.now(),
+        messageCount: (currentThreadSummary ? currentThreadSummary.messageCount + 1 : nextMessages.length),
+        lastMessage: lastForMeta,
+      };
+      dispatch({ type: 'UPSERT_THREAD_META', payload: metaForAI });
+      const currentForStreaming = { id: threadId, name: metaForAI.name, createdAt: metaForAI.createdAt, updatedAt: metaForAI.updatedAt, messages: nextMessages } as Thread;
 
       // 4) Request AI response with streaming
       console.log('🔄 AppContext: Setting loading to true');
       dispatch({ type: 'SET_LOADING', payload: true });
       try {
-        const finalThread = await threadService.continueConversationStreaming(currentThread, state.selectedModel, aiMsg.id);
+        const finalThread = await threadService.continueConversationStreaming(currentForStreaming, state.selectedModel, aiMsg.id);
         console.log('✅ AppContext: Received AI response; updating thread');
-        dispatch({ type: 'UPDATE_THREAD', payload: finalThread });
+        // Update messages for current thread and meta list
+        dispatch({ type: 'SET_CURRENT_THREAD_MESSAGES', payload: finalThread.messages });
+        // Persist the final thread state
+        try { await StorageService.saveThread(finalThread); } catch {}
+        const last = finalThread.messages[finalThread.messages.length - 1];
+        const finalMeta: ThreadSummary = {
+          id: finalThread.id,
+          name: finalThread.name,
+          createdAt: finalThread.createdAt,
+          updatedAt: finalThread.updatedAt,
+          messageCount: finalThread.messages.length,
+          lastMessage: last,
+        };
+        dispatch({ type: 'UPSERT_THREAD_META', payload: finalMeta });
       } catch (error) {
         console.error('❌ AppContext: Failed to get AI response:', error);
         // Error already handled inside service with assistant error message; state may already be updated
@@ -314,6 +366,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         await threadService.deleteThread(threadId);
         dispatch({ type: 'DELETE_THREAD', payload: threadId });
+        if (state.currentThreadId === threadId) {
+          dispatch({ type: 'SET_CURRENT_THREAD_MESSAGES', payload: [] });
+        }
       } catch (error) {
         console.error('Failed to delete thread:', error);
         throw error;

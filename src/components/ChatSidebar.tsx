@@ -13,12 +13,12 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Thread } from '../types';
+import { ThreadSummary } from '../types';
 import Haptics from '../utils/Haptics';
 
 type Props = {
   visible: boolean;
-  threads: Thread[];
+  threads: ThreadSummary[];
   currentThreadId: string | null;
   onSelectThread: (threadId: string) => void;
   onClose: () => void;
@@ -154,7 +154,7 @@ export const ChatSidebar: React.FC<Props> = ({
 
           <View style={styles.content}> 
             <FlatList
-              data={threads}
+               data={threads}
               keyExtractor={(item) => item.id}
               renderItem={({ item }) => (
                 <TouchableOpacity
@@ -197,9 +197,14 @@ export const ChatSidebar: React.FC<Props> = ({
                       <Text style={styles.threadName} numberOfLines={1}>
                         {item.name || 'New Chat'}
                       </Text>
-                      {item.messages[0] && (
+                      {item.lastMessage && (
                         <Text style={styles.threadSnippet} numberOfLines={1}>
-                          {item.messages[item.messages.length - 1]?.content || ''}
+                          {item.lastMessage?.content || ''}
+                        </Text>
+                      )}
+                      {!item.lastMessage && typeof item.messageCount === 'number' && item.messageCount > 0 && (
+                        <Text style={styles.threadSnippet} numberOfLines={1}>
+                          {item.messageCount} messages
                         </Text>
                       )}
                     </Animated.View>

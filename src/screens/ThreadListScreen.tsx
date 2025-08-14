@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { useApp } from '../context/AppContext';
-import { NavigationParams, Thread } from '../types';
+import { NavigationParams, ThreadSummary } from '../types';
 
 type ThreadListNavigationProp = StackNavigationProp<NavigationParams, 'ThreadList'>;
 
@@ -20,12 +20,12 @@ interface Props {
 const ThreadListScreen: React.FC<Props> = ({ navigation }) => {
   const { state, actions } = useApp();
 
-  const handleThreadSelect = (thread: Thread) => {
+  const handleThreadSelect = (thread: ThreadSummary) => {
     actions.setCurrentThread(thread.id);
     navigation.navigate('Chat', { threadId: thread.id });
   };
 
-  const handleDeleteThread = (thread: Thread) => {
+  const handleDeleteThread = (thread: ThreadSummary) => {
     Alert.alert(
       'Delete Conversation',
       `Are you sure you want to delete "${thread.name}"?`,
@@ -62,7 +62,7 @@ const ThreadListScreen: React.FC<Props> = ({ navigation }) => {
     }
   };
 
-  const renderThread = ({ item }: { item: Thread }) => (
+  const renderThread = ({ item }: { item: ThreadSummary }) => (
     <TouchableOpacity
       style={styles.threadItem}
       onPress={() => handleThreadSelect(item)}
@@ -77,12 +77,12 @@ const ThreadListScreen: React.FC<Props> = ({ navigation }) => {
         </Text>
       </View>
       <Text style={styles.threadPreview} numberOfLines={2}>
-        {item.messages.length > 0
-          ? item.messages[item.messages.length - 1].content
+        {item.lastMessage
+          ? item.lastMessage.content
           : 'No messages yet'}
       </Text>
       <Text style={styles.messageCount}>
-        {item.messages.length} message{item.messages.length !== 1 ? 's' : ''}
+        {item.messageCount} message{item.messageCount !== 1 ? 's' : ''}
       </Text>
     </TouchableOpacity>
   );
@@ -99,8 +99,8 @@ const ThreadListScreen: React.FC<Props> = ({ navigation }) => {
     </View>
   );
 
-  // Filter out empty threads for display
-  const visibleThreads = state.threads.filter(thread => thread.messages.length > 0);
+  // Filter out empty threads for display (support both meta count and messages)
+  const visibleThreads = state.threads.filter(thread => thread.messageCount > 0);
 
   return (
     <View style={styles.container}>
