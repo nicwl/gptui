@@ -30,13 +30,19 @@ export const LezerStreamingText: React.FC<StreamingTextProps> = ({
   const [wasStreaming, setWasStreaming] = React.useState(false);
 
   // Create Lezer renderer
+  const fontSize = (style as any)?.fontSize ?? 16;
+  const lineHeight = (style as any)?.lineHeight ?? Math.round(((style as any)?.fontSize ?? 16) * 1.4);
+  const color = (style as any)?.color;
+  const backgroundColor = (style as any)?.backgroundColor;
+  const fontFamily = (style as any)?.fontFamily;
+
   const styleConfig: MarkdownStyleConfig = React.useMemo(() => ({
-    fontSize: (style as any)?.fontSize ?? 16,
-    lineHeight: (style as any)?.lineHeight ?? Math.round(((style as any)?.fontSize ?? 16) * 1.4),
-    color: (style as any)?.color,
-    backgroundColor: (style as any)?.backgroundColor,
-    fontFamily: (style as any)?.fontFamily,
-  }), [style]);
+    fontSize,
+    lineHeight,
+    color,
+    backgroundColor,
+    fontFamily,
+  }), [fontSize, lineHeight, color, backgroundColor, fontFamily]);
 
   const renderer = React.useMemo(() => new LezerMarkdownRenderer(styleConfig), [styleConfig]);
 

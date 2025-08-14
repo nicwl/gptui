@@ -65,6 +65,9 @@ export class LezerMarkdownRenderer {
   // Cache for incremental parsing
   private lastText: string = '';
   private lastTree: Tree | null = null;
+  // Cache for incremental rendering (maps stable node identity -> built React subtree)
+  private lastRenderCache: Map<string, React.ReactNode> = new Map();
+  private currentRenderCache: Map<string, React.ReactNode> = new Map();
   
   constructor(styleConfig: MarkdownStyleConfig) {
     this.styleConfig = styleConfig;
@@ -74,8 +77,11 @@ export class LezerMarkdownRenderer {
    * Parse markdown text and render as React components
    */
   render(text: string, baseStyle: any): React.ReactNode {
+    // Capture previous parse state for incremental reuse decisions
+    const prevText = this.lastText;
+    const prevTree = this.lastTree;
     const tree = this.parseIncremental(text);
-    const root = this.renderUsingIterate(tree, text, baseStyle);
+    const root = this.renderUsingIterate(tree, text, baseStyle, prevText, prevTree, true);
     return [root];
   }
 
@@ -94,7 +100,7 @@ export class LezerMarkdownRenderer {
     return nextTree;
   }
 
-  private renderUsingIterate(tree: Tree, text: string, baseStyle: any): React.ReactNode {
+  private renderUsingIterate(tree: Tree, text: string, baseStyle: any, prevText: string | null, prevTree: Tree | null, allowReuse: boolean): React.ReactNode {
     type Frame = {
       name: string;
       from: number;
@@ -106,6 +112,12 @@ export class LezerMarkdownRenderer {
       parentName?: string;
       listDepth: number;
     };
+
+    // Prepare incremental reuse
+    const canAppendReuse = Boolean(allowReuse && prevTree && prevText && text.startsWith(prevText));
+    const stableBoundary = canAppendReuse ? (prevText as string).length : -1;
+    const prevCache = this.lastRenderCache;
+    this.currentRenderCache = new Map();
 
     const baseFontSize = this.styleConfig.fontSize;
     const baseLineHeight = this.styleConfig.lineHeight;
@@ -231,6 +243,17 @@ export class LezerMarkdownRenderer {
     const stack: Frame[] = [];
     let root: React.ReactNode | null = null;
 
+    const makeCacheKey = (name: string, from: number, to: number) => `${name}:${from}:${to}`;
+    const isReusableContainer = (name: string) => (
+      name === 'Document' ||
+      name === 'Paragraph' ||
+      name === 'ATXHeading1' || name === 'ATXHeading2' || name === 'ATXHeading3' || name === 'ATXHeading4' || name === 'ATXHeading5' || name === 'ATXHeading6' ||
+      name === 'SetextHeading1' || name === 'SetextHeading2' ||
+      name === 'BulletList' || name === 'OrderedList' || name === 'ListItem' ||
+      name === 'Emphasis' || name === 'StrongEmphasis' || name === 'Strikethrough' ||
+      name === 'Link' || name === 'Blockquote'
+    );
+
     tree.iterate({
       enter: (node: SyntaxNodeRef) => {
         const parent = stack[stack.length - 1];
@@ -238,6 +261,32 @@ export class LezerMarkdownRenderer {
         pushGap(parent, node.from);
 
         const name = node.name;
+
+        // Incremental reuse: if we are in append-only mode, and this node is fully before the stable boundary,
+        // try to reuse the previously built subtree and skip traversal of its children.
+        if (canAppendReuse && node.to <= stableBoundary && isReusableContainer(name)) {
+          const key = makeCacheKey(name, node.from, node.to);
+          const cached = prevCache.get(key);
+          if (cached) {
+            if (parent) {
+              // Attach a keyed clone to keep reconciliation stable
+              parent.children.push(
+                React.isValidElement(cached)
+                  ? React.cloneElement(cached as React.ReactElement, { key: `node-${name}-${node.from}-${node.to}` })
+                  : cached
+              );
+              parent.prevChildName = name;
+              parent.lastEnd = Math.max(parent.lastEnd, node.to);
+            } else {
+              root = React.isValidElement(cached)
+                ? React.cloneElement(cached as React.ReactElement, { key: `node-${name}-${node.from}-${node.to}` })
+                : cached;
+            }
+            // Preserve in the new cache for subsequent renders
+            this.currentRenderCache.set(key, cached);
+            return false; // skip subtree
+          }
+        }
 
         // Ignored structural/mark nodes
         if (IGNORED.has(name)) {
@@ -627,6 +676,12 @@ export class LezerMarkdownRenderer {
         } else {
           root = built;
         }
+
+        // Save reusable containers into the render cache
+        if (isReusableContainer(frame.name)) {
+          const cacheKey = makeCacheKey(frame.name, frame.from, frame.to);
+          this.currentRenderCache.set(cacheKey, built as React.ReactNode);
+        }
       }
     });
 
@@ -634,6 +689,9 @@ export class LezerMarkdownRenderer {
     if (!root) {
       root = <Text style={baseStyle}>{text}</Text>;
     }
+
+    // Swap caches for next render
+    this.lastRenderCache = this.currentRenderCache;
     return root;
   }
 
