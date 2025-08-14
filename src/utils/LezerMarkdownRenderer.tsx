@@ -94,9 +94,6 @@ export class LezerMarkdownRenderer {
     return nextTree;
   }
 
-  /**
-   * New renderer that uses Tree.iterate enter/leave traversal instead of manual cursor loops
-   */
   private renderUsingIterate(tree: Tree, text: string, baseStyle: any): React.ReactNode {
     type Frame = {
       name: string;
