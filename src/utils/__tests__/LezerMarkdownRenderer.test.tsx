@@ -757,4 +757,81 @@ If you want, I can also make you a sample **README.md** that looks like somethin
     expect(children.length).toBeGreaterThan(15); // Should have many elements
     expect(allText.length).toBeGreaterThan(500); // Should have substantial content
   });
+
+  it('renders content after a GFM table and shows table bottom border', () => {
+    const renderer = new LezerMarkdownRenderer(defaultStyleConfig);
+    const md = `# Title
+
+Some intro text.
+
+| Feature         | Supported? | Notes                          |
+|-----------------|------------|--------------------------------|
+| Bold text       | ✅         | Use **bold**                    |
+| Images          | ✅         | ![alt](url)                     |
+
+## Links & Images
+
+[Google](https://www.google.com)`;
+
+    const result = renderer.render(md, defaultStyle);
+    expect(Array.isArray(result)).toBe(true);
+    const doc = (result as any)[0];
+    expect(doc.type).toBe('View');
+
+    // Flatten all text content
+    const textOf = (el: any): string => {
+      if (typeof el === 'string') return el;
+      if (typeof el === 'number') return String(el);
+      if (!el) return '';
+      const ch = el.props?.children;
+      if (typeof ch === 'string') return ch;
+      if (Array.isArray(ch)) return ch.map(textOf).join('');
+      return textOf(ch);
+    };
+
+    const allText = textOf(doc);
+    expect(allText).toContain('Links & Images');
+    expect(allText).toContain('Google');
+  });
+
+  it('renders GFM table cell text content (strings and inline code) correctly', () => {
+    const renderer = new LezerMarkdownRenderer(defaultStyleConfig);
+    const md = `
+| Feature         | Supported? | Notes                          |
+|-----------------|------------|--------------------------------|
+| Bold text       | ✅         | Use \`**bold**\`                  |
+| Images          | ✅         | \`![alt](url)\`                   |
+| Nested lists    | ✅         | Indent with two spaces          |
+| Footnotes       | ⚠️         | Not all platforms support them  |
+`;
+
+    const result = renderer.render(md, defaultStyle);
+    const doc = (result as any)[0];
+
+    const textOf = (el: any): string => {
+      if (typeof el === 'string') return el;
+      if (typeof el === 'number') return String(el);
+      if (!el) return '';
+      const ch = el.props?.children;
+      if (typeof ch === 'string') return ch;
+      if (Array.isArray(ch)) return ch.map(textOf).join('');
+      return textOf(ch);
+    };
+
+    const allText = textOf(doc);
+    expect(allText).toContain('Feature');
+    expect(allText).toContain('Supported?');
+    expect(allText).toContain('Notes');
+
+    expect(allText).toContain('Bold text');
+    expect(allText).toContain('Images');
+    expect(allText).toContain('Nested lists');
+    expect(allText).toContain('Footnotes');
+
+    expect(allText).toContain('Use ');
+    expect(allText).toContain('**bold**');
+    expect(allText).toContain('![alt](url)');
+    expect(allText).toContain('Indent with two spaces');
+    expect(allText).toContain('Not all platforms support them');
+  });
 });

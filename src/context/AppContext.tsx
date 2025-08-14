@@ -319,7 +319,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       };
       
       console.log('🤖 AppContext: Adding initial streaming AI message to state');
-      const nextMessages = [...(state.currentThreadMessages.length ? state.currentThreadMessages : baseMessages), aiMsg];
+      // Always use baseMessages, which we ensured includes the newly added user message
+      const nextMessages = [...baseMessages, aiMsg];
       dispatch({ type: 'SET_CURRENT_THREAD_MESSAGES', payload: nextMessages });
       const lastForMeta = aiMsg;
       const metaForAI: ThreadSummary = {

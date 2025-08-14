@@ -8,7 +8,7 @@
 import React from 'react';
 import { Text, View, Platform, Image, Linking } from 'react-native';
 import { ScrollView as GHScrollView } from 'react-native-gesture-handler';
-import { parser } from '@lezer/markdown';
+import { parser, GFM } from '@lezer/markdown';
 import { Tree, NodeType, TreeFragment, TreeCursor, SyntaxNodeRef } from '@lezer/common';
 
 // Types for our rendered components
@@ -28,6 +28,9 @@ export interface LezerRenderNode {
   content?: string;
   children: LezerRenderNode[];
 }
+
+// Configure parser with GitHub Flavored Markdown extensions (tables, task lists, strikethrough, autolink)
+const mdParser = parser.configure([GFM]);
 
 // Horizontal code block component for better layout
 const HorizontalCodeBlock: React.FC<{
@@ -60,6 +63,100 @@ const HorizontalCodeBlock: React.FC<{
   );
 };
 
+// Auto-size table helpers: measure natural cell widths and lock columns
+type AutoSizeContextType = {
+  report: (colIndex: number, width: number) => void;
+  colWidths: number[];
+};
+
+const AutoSizeTableContext = React.createContext<AutoSizeContextType | null>(null);
+
+const AutoSizeTable: React.FC<{
+  numCols: number;
+  children: React.ReactNode;
+  initialColWidths?: number[];
+  onWidthsChange?: (colWidths: number[]) => void;
+  persistKey?: string;
+}> = ({ numCols, children, initialColWidths, onWidthsChange }) => {
+  const [colWidths, setColWidths] = React.useState<number[]>(() => {
+    const cols = Math.max(0, numCols);
+    const init = Array.from({ length: cols }, (_, i) => (initialColWidths && Number.isFinite(initialColWidths[i] as any) ? (initialColWidths[i] as number) : 0));
+    return init;
+  });
+
+  React.useEffect(() => {
+    // If numCols changes, resize the array while preserving previous widths
+    setColWidths(prev => {
+      if (prev.length === numCols) return prev;
+      const cols = Math.max(0, numCols);
+      const next = Array.from({ length: cols }, (_, i) => {
+        const fromPrev = prev[i] || 0;
+        const fromInit = initialColWidths && Number.isFinite(initialColWidths[i] as any) ? (initialColWidths[i] as number) : 0;
+        return Math.max(fromPrev, fromInit);
+      });
+      return next;
+    });
+  }, [numCols, initialColWidths]);
+
+  // Notify parent when widths change (to persist across remounts)
+  React.useEffect(() => {
+    if (onWidthsChange) onWidthsChange(colWidths);
+  }, [colWidths, onWidthsChange]);
+
+  const report = React.useCallback((colIndex: number, width: number) => {
+    if (!Number.isFinite(width) || width <= 0) return;
+    setColWidths(prev => {
+      if (colIndex < 0 || colIndex >= prev.length) return prev;
+      const rounded = Math.ceil(width);
+      if (rounded > prev[colIndex]) {
+        const next = prev.slice();
+        next[colIndex] = rounded;
+        return next;
+      }
+      return prev;
+    });
+  }, []);
+
+  const value = React.useMemo(() => ({ report, colWidths }), [report, colWidths]);
+
+  return <AutoSizeTableContext.Provider value={value}>{children}</AutoSizeTableContext.Provider>;
+};
+
+const AutoCell: React.FC<{ columnIndex?: number; style?: any; children: React.ReactNode }> = ({ columnIndex, style, children }) => {
+  const ctx = React.useContext(AutoSizeTableContext);
+  const width = ctx && columnIndex != null ? ctx.colWidths[columnIndex] : 0;
+
+  const onLayout = React.useCallback((e: any) => {
+    if (!ctx || columnIndex == null) return;
+    const w = e?.nativeEvent?.layout?.width;
+    if (Number.isFinite(w) && w > 0) ctx.report(columnIndex, w);
+  }, [ctx, columnIndex]);
+
+  // Use minWidth so columns can grow when later content is wider
+  const widthStyle = width > 0 ? { minWidth: width, flexGrow: 0, flexShrink: 0 } : { flexShrink: 0 };
+
+  return (
+    <View onLayout={onLayout} style={[{ flexGrow: 0 }, style, widthStyle]}>
+      {children}
+    </View>
+  );
+};
+
+const AutoRow: React.FC<{ style?: any; children: React.ReactNode }> = ({ style, children }) => {
+  const ctx = React.useContext(AutoSizeTableContext);
+  const totalWidth = React.useMemo(() => {
+    if (!ctx) return 0;
+    return ctx.colWidths.reduce((sum, w) => sum + (Number.isFinite(w) ? w : 0), 0);
+  }, [ctx]);
+  // Use minWidth so the table can expand as columns grow
+  const widthStyle = totalWidth > 0 ? { minWidth: totalWidth, alignSelf: 'flex-start' } : { alignSelf: 'flex-start' };
+  return (
+    <View style={[{ flexDirection: 'row' }, style, widthStyle]}>
+      {children}
+    </View>
+  );
+};
+
 export class LezerMarkdownRenderer {
   private styleConfig: MarkdownStyleConfig;
   // Cache for incremental parsing
@@ -68,6 +165,8 @@ export class LezerMarkdownRenderer {
   // Cache for incremental rendering (maps stable node identity -> built React subtree)
   private lastRenderCache: Map<string, React.ReactNode> = new Map();
   private currentRenderCache: Map<string, React.ReactNode> = new Map();
+  // Persist table column widths across re-renders/streaming for stability
+  private tableWidthCache: Map<string, number[]> = new Map();
   
   constructor(styleConfig: MarkdownStyleConfig) {
     this.styleConfig = styleConfig;
@@ -89,11 +188,14 @@ export class LezerMarkdownRenderer {
   private parseIncremental(text: string): Tree {
     let nextTree: Tree;
     if (this.lastTree && text.startsWith(this.lastText)) {
-      // Reuse previous tree fragments for incremental parsing
-      const fragments = TreeFragment.addTree(this.lastTree);
-      nextTree = parser.parse(text, fragments);
+      // Reuse previous tree fragments for incremental parsing.
+      // Mark the previous parse as partial (openEnd) so that block nodes at
+      // the end (e.g., tables, lists, code fences) can properly extend across
+      // streaming chunk boundaries.
+      const fragments = TreeFragment.addTree(this.lastTree, undefined, true);
+      nextTree = mdParser.parse(text, fragments);
     } else {
-      nextTree = parser.parse(text);
+      nextTree = mdParser.parse(text);
     }
     this.lastText = text;
     this.lastTree = nextTree;
@@ -139,7 +241,16 @@ export class LezerMarkdownRenderer {
     const normalizeGapForParent = (parentName: string | undefined, prevChildName: string | null, s: string) => {
       if (!s) return s;
           if (parentName === 'Paragraph') return s.replace(/\n/g, ' ');
-      if (parentName === 'BulletList' || parentName === 'OrderedList' || parentName === 'Document' || parentName === 'ListItem') return '';
+      if (
+        parentName === 'BulletList' ||
+        parentName === 'OrderedList' ||
+        parentName === 'Document' ||
+        parentName === 'ListItem' ||
+        // Suppress raw text gaps inside table container rows/headers (cells will handle their own text)
+        parentName === 'Table' ||
+        parentName === 'TableHeader' ||
+        parentName === 'TableRow'
+      ) return '';
       if (
         parentName && (
           parentName.startsWith('ATXHeading') ||
@@ -238,6 +349,9 @@ export class LezerMarkdownRenderer {
       'CodeInfo',
       'QuoteMark',
       'URL',
+      // GFM markers/delimiters we don't render directly
+      'TaskMarker',
+      'TableDelimiter',
     ]);
 
     const stack: Frame[] = [];
@@ -251,7 +365,10 @@ export class LezerMarkdownRenderer {
       name === 'SetextHeading1' || name === 'SetextHeading2' ||
       name === 'BulletList' || name === 'OrderedList' || name === 'ListItem' ||
       name === 'Emphasis' || name === 'StrongEmphasis' || name === 'Strikethrough' ||
-      name === 'Link' || name === 'Blockquote'
+      name === 'Link' || name === 'Blockquote' ||
+      // GFM containers
+      name === 'Table' || name === 'TableHeader' || name === 'TableRow' || name === 'TableCell' ||
+      name === 'Task'
     );
 
     tree.iterate({
@@ -512,6 +629,23 @@ export class LezerMarkdownRenderer {
           case 'ListItem':
             // Inherit
             break;
+          // GFM containers
+          case 'Table':
+            // Table container
+            break;
+          case 'TableHeader':
+            // Make header cells bold
+            styleForChildren = [styleForChildren, { fontWeight: 'bold' }];
+            break;
+          case 'TableRow':
+            // Row inherits
+            break;
+          case 'TableCell':
+            // Cell inherits
+            break;
+          case 'Task':
+            // Task content inherits; marker handled at ListItem level
+            break;
         }
 
         // Compute list depth based on ancestors
@@ -546,6 +680,27 @@ export class LezerMarkdownRenderer {
 
         // Build element for this frame
         let built: React.ReactNode | null = null;
+        // Helper: detect task list and state for a ListItem
+        const getTaskInfoFromListItem = (liNode: SyntaxNodeRef): { isTask: boolean; checked: boolean } => {
+          const task = liNode.node.getChild('Task');
+          if (!task) return { isTask: false, checked: false };
+          const marker = task.getChild('TaskMarker');
+          if (!marker) return { isTask: true, checked: false };
+          const mtxt = text.slice(marker.from, marker.to);
+          const checked = /\[[xX]\]/.test(mtxt);
+          return { isTask: true, checked };
+        };
+
+        // Helper: normalize inline children under non-Text containers
+        const normalizeInlineChildren = (children: React.ReactNode[], style: any) => {
+          return children.map((ch, i) => {
+            if (typeof ch === 'string' || typeof ch === 'number') {
+              return <Text key={`inline-${i}`} style={normalizeTextStyle(style)}>{ch}</Text>;
+            }
+            return ch;
+          });
+        };
+
         switch (frame.name) {
           case 'Document':
             // Ensure the root content expands to the bubble width; avoid collapsing to marker width
@@ -609,17 +764,26 @@ export class LezerMarkdownRenderer {
           }
           case 'ListItem': {
             const isOrdered = frame.parentName === 'OrderedList';
-            const num = isOrdered ? extractListItemNumberFromNode(node) : undefined;
+            const { isTask, checked } = getTaskInfoFromListItem(node);
+            const num = isOrdered && !isTask ? extractListItemNumberFromNode(node) : undefined;
             const digits = isOrdered ? String(num || 1).length : 1;
-            const markerWidth = isOrdered ? (digits >= 3 ? 24 : digits === 2 ? 18 : 14) : 14;
+            const markerWidth = isTask ? 22 : (isOrdered ? (digits >= 3 ? 24 : digits === 2 ? 18 : 14) : 14);
             const markerStyle = normalizeTextStyle([
               frame.styleForChildren,
-              { width: markerWidth, marginRight: 4, marginVertical: 4, textAlign: 'right', flexShrink: 0, alignSelf: 'flex-start' }
+              { width: markerWidth, marginRight: 6, marginVertical: 4, textAlign: isTask ? 'left' : 'right', flexShrink: 0, alignSelf: 'flex-start' }
             ]);
             const indent = 0;
             built = (
               <View style={{ flexDirection: 'row', alignItems: 'flex-start', marginLeft: indent, marginVertical: 0, width: '100%', maxWidth: '100%', alignSelf: 'stretch', marginRight: 4 }}>
-                <Text style={markerStyle}>{isOrdered ? `${num || '1'}.` : '•'}</Text>
+                {isTask ? (
+                  <View style={[{ width: markerWidth, alignItems: 'center' }]}>
+                    <View style={{ width: 18, height: 18, borderWidth: 1, borderColor: '#A1A1AA', borderRadius: 3, backgroundColor: checked ? '#007AFF' : 'transparent', alignItems: 'center', justifyContent: 'center' }}>
+                      {checked ? <Text style={{ color: 'white', fontWeight: 'bold', lineHeight: 18 }}>✓</Text> : null}
+                    </View>
+                  </View>
+                ) : (
+                  <Text style={markerStyle}>{isOrdered ? `${num || '1'}.` : '•'}</Text>
+                )}
                 <View style={{ flex: 1, minWidth: 0, flexShrink: 1, maxWidth: '100%' }}>{frame.children}</View>
               </View>
             );
@@ -659,6 +823,130 @@ export class LezerMarkdownRenderer {
               </View>
             );
             break;
+          // GFM: Tables
+          case 'Table': {
+            // Measurement-based auto-sizing using AutoSizeTable
+            const rowElements: any[] = Array.isArray(frame.children) ? frame.children.filter((el: any) => !!el) : [frame.children];
+
+            // Determine header-based column count if available
+            let headerColCount = 0;
+            try {
+              const headerNode = node.node.getChild('TableHeader');
+              if (headerNode) {
+                // Some grammars nest cells under a row; account for both
+                const directHeaderCells = headerNode.getChildren('TableCell');
+                if (directHeaderCells && directHeaderCells.length > 0) {
+                  headerColCount = directHeaderCells.length;
+                } else {
+                  const headerRows = headerNode.getChildren('TableRow') || [];
+                  headerColCount = headerRows.reduce((maxCols, r) => {
+                    const cells = r.getChildren('TableCell') || [];
+                    return Math.max(maxCols, cells.length);
+                  }, 0);
+                }
+              }
+            } catch {}
+
+            const getCells = (rowEl: any): any[] => {
+              if (!rowEl || !rowEl.props) return [];
+              const kids = React.Children.toArray(rowEl.props.children) as any[];
+              return kids.filter(Boolean);
+            };
+            const dynamicMaxCols = rowElements.reduce((acc: number, rowEl: any) => Math.max(acc, getCells(rowEl).length), 0);
+            const numCols = headerColCount > 0 ? headerColCount : dynamicMaxCols;
+
+            // Persist widths keyed by stable table start position
+            const tableKey = `tbl:${frame.from}`;
+            const cachedWidths = this.tableWidthCache.get(tableKey) || [];
+
+            built = (
+              <GHScrollView
+                horizontal
+                bounces={false}
+                showsHorizontalScrollIndicator
+                nestedScrollEnabled
+                directionalLockEnabled
+                keyboardShouldPersistTaps="handled"
+                onStartShouldSetResponderCapture={() => true}
+                onMoveShouldSetResponderCapture={() => true}
+                style={{ maxWidth: '100%', flexGrow: 0, flexShrink: 0, marginVertical: 8 }}
+                contentContainerStyle={{ flexGrow: 0 }}
+              >
+                <View style={{ borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 6, alignSelf: 'flex-start' }}>
+                  <AutoSizeTable
+                    numCols={numCols}
+                    initialColWidths={cachedWidths}
+                    onWidthsChange={(next) => {
+                      // Trim or extend cached widths to current numCols
+                      const normalized = Array.from({ length: Math.max(0, numCols) }, (_, i) => next[i] || 0);
+                      this.tableWidthCache.set(tableKey, normalized);
+                    }}
+                  >
+                    {rowElements}
+                  </AutoSizeTable>
+                </View>
+              </GHScrollView>
+            );
+            break;
+          }
+          case 'TableHeader': {
+            // Render header row; wrap each cell with AutoCell for measurement, and row with AutoRow
+            const headerChildren = frame.children;
+            const sizedChildren = headerChildren.map((child: any, idx: number) => {
+              if (!React.isValidElement(child)) return child;
+              const prevStyle: any = (child as any).props ? (child as any).props.style : undefined;
+              const style: any = [prevStyle || {}, idx === headerChildren.length - 1 ? { borderRightWidth: 0 } : null].filter(Boolean);
+              const normalizedChild = React.cloneElement(child as React.ReactElement<any>, { key: (child as any).key || `thc-${idx}`, style: style as any });
+              return (
+                <AutoCell key={`thcell-${idx}`} columnIndex={idx}>
+                  {normalizedChild}
+                </AutoCell>
+              );
+            });
+            built = (
+              <AutoRow style={{ backgroundColor: 'rgba(0,0,0,0.04)', borderBottomWidth: 1, borderBottomColor: '#E5E7EB' }}>
+                {sizedChildren}
+              </AutoRow>
+            );
+            break;
+          }
+          case 'TableRow': {
+            const rowChildren = frame.children;
+            const sizedChildren = rowChildren.map((child: any, idx: number) => {
+              if (!React.isValidElement(child)) return child;
+              const prevStyle: any = (child as any).props ? (child as any).props.style : undefined;
+              const style: any = [prevStyle || {}, idx === rowChildren.length - 1 ? { borderRightWidth: 0 } : null].filter(Boolean);
+              const normalizedChild = React.cloneElement(child as React.ReactElement<any>, { key: (child as any).key || `trc-${idx}`, style: style as any });
+              return (
+                <AutoCell key={`trcell-${idx}`} columnIndex={idx}>
+                  {normalizedChild}
+                </AutoCell>
+              );
+            });
+            built = (
+              <AutoRow style={{ borderBottomWidth: 1, borderBottomColor: '#E5E7EB' }}>
+                {sizedChildren}
+              </AutoRow>
+            );
+            break;
+          }
+          case 'TableCell': {
+            const normalizedChildren = normalizeInlineChildren(frame.children, frame.styleForChildren);
+            const hasNonTextChild = normalizedChildren.some((ch: any) => ch && typeof ch === 'object' && ch.type && ch.type !== Text);
+            const cellInner = hasNonTextChild ? (
+              normalizedChildren
+            ) : (
+              <Text style={normalizeTextStyle([frame.styleForChildren, { flexShrink: 1 }])}>
+                {normalizedChildren}
+              </Text>
+            );
+            built = (
+              <View style={{ flexGrow: 0, flexShrink: 0, minWidth: 0, paddingVertical: 10, paddingHorizontal: 12, borderRightWidth: 1, borderRightColor: '#E5E7EB', justifyContent: 'center' }}>
+                {cellInner}
+              </View>
+            );
+            break;
+          }
           default:
             // Unknown containers: render their children inline
             built = <Text style={normalizeTextStyle(frame.styleForChildren)}>{frame.children}</Text>;
