@@ -42,6 +42,9 @@ const initialState: AppState = {
   selectedModel: 'gpt-5-chat-latest',
 };
 
+// Debug flag to disable AI responses (useful for UI testing Markdown rendering)
+const DISABLE_AI_RESPONSES = false;
+
 function appReducer(state: AppState, action: AppAction): AppState {
   console.log('🔄 AppContext: Reducer action:', action.type, action.payload);
   
@@ -263,6 +266,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       } catch (error) {
         console.error('❌ AppContext: Failed to persist user message:', error);
         // Keep optimistic state even if persistence fails
+      }
+
+      // If AI responses are disabled, stop here (only show user's Markdown message)
+      if (DISABLE_AI_RESPONSES) {
+        return;
       }
 
       // 3) Add initial streaming AI message to state

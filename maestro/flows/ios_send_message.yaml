@@ -1,0 +1,10 @@
+appId: org.reactjs.native.example.gptui
+name: iOS Send Message
+---
+- launchApp:
+    clearState: false
+- tapOn: "Type a message..."
+- inputText: "Maestro test message"
+- tapOn: "Send"
+- assertVisible: "Maestro test message"
+

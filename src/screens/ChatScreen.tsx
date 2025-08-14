@@ -129,6 +129,8 @@ const ChatScreen: React.FC<Props> = ({ navigation, route }) => {
         <TouchableOpacity
           style={styles.headerButton}
           onPress={toggleSidebar}
+          testID="menuButton"
+          accessibilityLabel="Open Menu"
         >
           <Text style={styles.headerButtonText}>☰</Text>
         </TouchableOpacity>

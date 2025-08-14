@@ -116,6 +116,7 @@ export const ChatSidebar: React.FC<Props> = ({
           onClose();
         }}
         style={styles.absoluteFill}
+        accessible={false}
       >
         <Animated.View style={[styles.dim, { opacity: dimOpacity }]} />
         <Animated.View
@@ -233,6 +234,8 @@ export const ChatSidebar: React.FC<Props> = ({
                     onSettingsPress();
                   }}
                   style={styles.settingsBtn}
+                  testID="settingsButton"
+                  accessibilityLabel="Settings"
                 >
                   <Text style={styles.settingsText}>Settings</Text>
                 </TouchableOpacity>

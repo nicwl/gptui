@@ -1,0 +1,19 @@
+appId: org.reactjs.native.example.gptui
+name: iOS Repro Markdown List
+---
+- launchApp:
+    clearState: false
+- tapOn: "New Chat"
+- tapOn: "Type a message..."
+- inputText: "- This is a very long list item that wraps across multiple lines to test markdown list rendering in the chat bubble. "
+- inputText: "It should continue to wrap and show proper bullet alignment and width behavior when the content is significantly long. "
+- inputText: "This sentence continues to ensure sufficient length for wrapping across multiple lines in the UI.\n"
+- inputText: "- Another very long list item that similarly wraps across multiple lines to test alignment and indentation behavior in our markdown renderer. "
+- inputText: "It should show correct indent and not overflow the bubble width.\n"
+- inputText: "- Final very long list item to confirm the behavior when there is only a single flat list in the message. "
+- inputText: "This item is also intentionally long to produce wrapping."
+- tapOn:
+    text: "Send"
+    enabled: true
+
+

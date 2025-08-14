@@ -7,7 +7,12 @@
     "ios": "react-native run-ios",
     "lint": "eslint .",
     "start": "react-native start",
-    "test": "jest"
+    "test": "jest",
+    "maestro:mcp": "PATH=/opt/homebrew/opt/openjdk@21/bin:$PATH maestro mcp",
+    "maestro:test:ios": "PATH=/opt/homebrew/opt/openjdk@21/bin:$PATH MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED=true maestro test maestro/flows/ios_smoke_text.yaml",
+    "maestro:test:ios:ids": "PATH=/opt/homebrew/opt/openjdk@21/bin:$PATH MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED=true maestro test maestro/flows/ios_smoke.yaml",
+    "maestro:test:ios:send": "PATH=/opt/homebrew/opt/openjdk@21/bin:$PATH MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED=true maestro test maestro/flows/ios_send_message.yaml",
+    "maestro:studio": "PATH=/opt/homebrew/opt/openjdk@21/bin:$PATH maestro studio"
   },
   "dependencies": {
     "@lezer/common": "^1.2.3",

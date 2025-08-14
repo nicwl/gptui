@@ -80,9 +80,9 @@ export const LezerStreamingText: React.FC<StreamingTextProps> = ({
         const deltaTime = now - lastUpdateTime;
 
         if (isStreaming) {
-          // During streaming: reveal 1 character every 2ms
-          if (deltaTime >= 2) {
-            setRevealedLength(prev => Math.min(prev + 1, contentLength));
+          // During streaming: reveal 2 characters every 2ms
+          if (deltaTime >= 1) {
+            setRevealedLength(prev => Math.min(prev + 2, contentLength));
             lastUpdateTime = now;
           }
         } else if (targetEndTime) {
@@ -94,7 +94,7 @@ export const LezerStreamingText: React.FC<StreamingTextProps> = ({
             if (deltaTime >= 2) {
               const framesRemaining = Math.max(1, Math.ceil(remainingTime / 16));
               const minCharsPerFrame = Math.ceil(remainingChars / framesRemaining);
-              const streamingSpeedChars = 1;
+              const streamingSpeedChars = 2;
               const charsToReveal = Math.max(streamingSpeedChars, minCharsPerFrame);
 
               setRevealedLength(prev => Math.min(prev + charsToReveal, contentLength));
@@ -134,30 +134,20 @@ export const LezerStreamingText: React.FC<StreamingTextProps> = ({
     };
   }, []);
 
-  // For assistant messages, use Lezer markdown rendering
-  if (isAssistant) {
-    if (!hasStartedRevealing) {
-      // Before streaming starts, show full content
-      const rendered = renderer.render(content, style);
-      return <>{Array.isArray(rendered) ? rendered.map((item, i) => React.cloneElement(item as React.ReactElement, { key: `static-${i}` })) : rendered}</>;
-    } else if (revealedLength >= [...content].length && !isStreaming && wasStreaming) {
-      // Streaming complete - show full content
-      const rendered = renderer.render(content, style);
-      return <>{Array.isArray(rendered) ? rendered.map((item, i) => React.cloneElement(item as React.ReactElement, { key: `complete-${i}` })) : rendered}</>;
-    } else {
-      // During streaming - show partial content
-      const visibleChars = [...content].slice(0, revealedLength);
-      const visibleContent = visibleChars.join('');
-      const rendered = renderer.render(visibleContent, style);
-      return <>{Array.isArray(rendered) ? rendered.map((item, i) => React.cloneElement(item as React.ReactElement, { key: `streaming-${i}` })) : rendered}</>;
-    }
+  // Use Lezer markdown rendering for all messages
+  if (!hasStartedRevealing) {
+    // Before streaming starts, show full content
+    const rendered = renderer.render(content, style);
+    return <>{Array.isArray(rendered) ? rendered.map((item, i) => React.cloneElement(item as React.ReactElement, { key: `static-${i}` })) : rendered}</>;
+  } else if (revealedLength >= [...content].length && !isStreaming && wasStreaming) {
+    // Streaming complete - show full content
+    const rendered = renderer.render(content, style);
+    return <>{Array.isArray(rendered) ? rendered.map((item, i) => React.cloneElement(item as React.ReactElement, { key: `complete-${i}` })) : rendered}</>;
+  } else {
+    // During streaming - show partial content (only occurs for assistant messages)
+    const visibleChars = [...content].slice(0, revealedLength);
+    const visibleContent = visibleChars.join('');
+    const rendered = renderer.render(visibleContent, style);
+    return <>{Array.isArray(rendered) ? rendered.map((item, i) => React.cloneElement(item as React.ReactElement, { key: `streaming-${i}` })) : rendered}</>;
   }
-
-  // For user messages - plain text with character reveal
-  const visibleContent = !hasStartedRevealing ? content : content.slice(0, revealedLength);
-  return (
-    <Text style={style}>
-      {visibleContent}
-    </Text>
-  );
 };

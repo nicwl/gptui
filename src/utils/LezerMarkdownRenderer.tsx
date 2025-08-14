@@ -502,7 +502,8 @@ export class LezerMarkdownRenderer {
         let built: React.ReactNode | null = null;
         switch (frame.name) {
           case 'Document':
-            built = <View style={[baseStyle, { flexShrink: 1, minWidth: 0 }]}>{frame.children}</View>;
+            // Ensure the root content expands to the bubble width; avoid collapsing to marker width
+            built = <View style={[baseStyle, { width: '100%', maxWidth: '100%', alignSelf: 'stretch' }]}>{frame.children}</View>;
             break;
           case 'Paragraph': {
             if (!frame.children || frame.children.length === 0) {
@@ -557,21 +558,21 @@ export class LezerMarkdownRenderer {
           case 'BulletList':
           case 'OrderedList': {
             const topLevel = (stack[stack.length - 1]?.name === 'Document');
-            built = <View style={{ marginVertical: 6, flexShrink: 1, minWidth: 0, maxWidth: '100%', marginLeft: topLevel ? 0 : 0 }}>{frame.children}</View>;
+            built = <View style={{ marginVertical: 0, width: '100%', maxWidth: '100%', alignSelf: 'stretch', marginLeft: topLevel ? 0 : 0 }}>{frame.children}</View>;
             break;
           }
           case 'ListItem': {
             const isOrdered = frame.parentName === 'OrderedList';
             const num = isOrdered ? extractListItemNumberFromNode(node) : undefined;
             const digits = isOrdered ? String(num || 1).length : 1;
-            const markerWidth = isOrdered ? (digits >= 3 ? 22 : digits === 2 ? 16 : 12) : 12;
+            const markerWidth = isOrdered ? (digits >= 3 ? 24 : digits === 2 ? 18 : 14) : 14;
             const markerStyle = normalizeTextStyle([
               frame.styleForChildren,
               { width: markerWidth, marginRight: 4, marginVertical: 4, textAlign: 'right', flexShrink: 0, alignSelf: 'flex-start' }
             ]);
-            const indent = Math.max(0, (frame.listDepth - 1) * 4);
+            const indent = 0;
             built = (
-              <View style={{ flexDirection: 'row', alignItems: 'flex-start', marginLeft: indent, marginVertical: 2, maxWidth: '100%' }}>
+              <View style={{ flexDirection: 'row', alignItems: 'flex-start', marginLeft: indent, marginVertical: 0, width: '100%', maxWidth: '100%', alignSelf: 'stretch', marginRight: 4 }}>
                 <Text style={markerStyle}>{isOrdered ? `${num || '1'}.` : '•'}</Text>
                 <View style={{ flex: 1, minWidth: 0, flexShrink: 1, maxWidth: '100%' }}>{frame.children}</View>
               </View>

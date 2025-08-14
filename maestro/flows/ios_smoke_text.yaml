@@ -1,0 +1,13 @@
+appId: org.reactjs.native.example.gptui
+name: iOS Smoke (text selectors)
+---
+- launchApp:
+    clearState: true
+- assertVisible: "Welcome to GPT Chat"
+- tapOn: "Open Menu"
+- waitForAnimationToEnd
+- tapOn: "Settings"
+- assertVisible: "OpenAI API Key"
+- back
+
+
